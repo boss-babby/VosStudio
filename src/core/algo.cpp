@@ -297,23 +297,39 @@ double leiden(Network& net, const ClusterOpts& o, vector<int>* labelsOut) {
   for (auto& l : net.links) { ea.push_back(l.a); eb.push_back(l.b); ew.push_back(o.normalizedWeights ? l.s : l.w); }
   double q = 0;
   vector<int> lab = leidenLabels(n, ea, eb, ew, o, &q);
-  // merge clusters smaller than minSize into their most connected neighbour cluster
+  // Merge clusters smaller than minSize into their most-connected eligible neighbour.
+  // Build adjacency once: scanning the entire edge list for every small node made this O(VE)
+  // on large sparse maps, even though only incident links can affect a node's destination.
   if (o.minSize > 1) {
+    vector<vector<std::pair<int, double>>> adj(static_cast<size_t>(n));
+    for (size_t e = 0; e < ea.size(); e++) {
+      int a = ea[e], b = eb[e];
+      if (a == b) continue;
+      adj[size_t(a)].push_back({b, ew[e]});
+      adj[size_t(b)].push_back({a, ew[e]});
+    }
+    vector<int> size(static_cast<size_t>(n), 0), seen(static_cast<size_t>(n), -1), touched;
+    vector<double> conn(static_cast<size_t>(n), 0);
+    int stamp = 0;
     for (int pass = 0; pass < 3; pass++) {
-      std::unordered_map<int, int> size;
-      for (int c : lab) size[c]++;
+      std::fill(size.begin(), size.end(), 0);
+      for (int c : lab) if (c >= 0 && c < n) size[size_t(c)]++;
       bool changed = false;
       for (int i = 0; i < n; i++) {
-        if (size[lab[i]] >= o.minSize) continue;
-        std::unordered_map<int, double> conn;
-        for (size_t e = 0; e < ea.size(); e++) {
-          if (ea[e] == i && lab[eb[e]] != lab[i]) conn[lab[eb[e]]] += ew[e];
-          if (eb[e] == i && lab[ea[e]] != lab[i]) conn[lab[ea[e]]] += ew[e];
+        int own = lab[size_t(i)];
+        if (own < 0 || own >= n || size[size_t(own)] >= o.minSize) continue;
+        ++stamp;
+        touched.clear();
+        for (const auto& edge : adj[size_t(i)]) {
+          int c = lab[size_t(edge.first)];
+          if (c == own || c < 0 || c >= n) continue;
+          if (seen[size_t(c)] != stamp) { seen[size_t(c)] = stamp; conn[size_t(c)] = 0; touched.push_back(c); }
+          conn[size_t(c)] += edge.second;
         }
         int best = -1;
         double bw = -1;
-        for (auto& kv : conn) if (size[kv.first] >= o.minSize && kv.second > bw) { bw = kv.second; best = kv.first; }
-        if (best >= 0) { size[lab[i]]--; lab[i] = best; size[best]++; changed = true; }
+        for (int c : touched) if (size[size_t(c)] >= o.minSize && conn[size_t(c)] > bw) { bw = conn[size_t(c)]; best = c; }
+        if (best >= 0) { size[size_t(own)]--; lab[size_t(i)] = best; size[size_t(best)]++; changed = true; }
       }
       if (!changed) break;
     }
@@ -357,6 +373,158 @@ Agreement partitionAgreement(const vector<int>& a, const vector<int>& b) {
 }
 
 // ------------------------------------------------------------ VOS layout
+namespace {
+constexpr int kBHLeafCapacity = 8;
+constexpr int kBHMaxDepth = 28;
+
+struct BHNode {
+  double cx = 0, cy = 0, cz = 0, half = 0;
+  double sum[3] = {0, 0, 0};
+  int mass = 0, begin = 0, end = 0;
+  int child[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+  bool leaf = true;
+};
+
+// Rebuilt from a coordinate snapshot once per large-map iteration. Queries use exact leaf interactions and a
+// monopole (count + centre of mass) for sufficiently distant cells. The target-containing branch is never collapsed,
+// so the target is excluded exactly rather than exerting a force on itself.
+class BarnesHutTree {
+ public:
+  BarnesHutTree(const vector<double>& xy, int n, int dimensions) : xy_(xy), n_(n), d_(dimensions) {
+    order_.resize(size_t(n_));
+    tmp_.resize(size_t(n_));
+    for (int i = 0; i < n_; i++) order_[size_t(i)] = i;
+    double lo[3] = {std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity(), std::numeric_limits<double>::infinity()};
+    double hi[3] = {-lo[0], -lo[1], -lo[2]};
+    for (int i = 0; i < n_; i++) for (int k = 0; k < d_; k++) {
+      double v = xy_[size_t(i) * d_ + k];
+      lo[k] = std::min(lo[k], v); hi[k] = std::max(hi[k], v);
+    }
+    double c[3] = {0, 0, 0}, span = 0;
+    for (int k = 0; k < d_; k++) { c[k] = (lo[k] + hi[k]) * 0.5; span = std::max(span, hi[k] - lo[k]); }
+    double half = std::max(1e-9, span * 0.5000001 + 1e-12);
+    nodes_.reserve(size_t(n_) * 2);
+    root_ = n_ ? build(0, n_, c[0], c[1], c[2], half, 0) : -1;
+  }
+
+  // Adds -sum_j ((x_i-x_j) / d^(2-r)) to gradient and the unweighted repulsion potential sum_j U(d).
+  void repulsion(int i, double exponent, double theta, double gradient[3], double& potential) const {
+    if (root_ >= 0) visit(root_, i, true, exponent, theta, gradient, potential);
+  }
+
+ private:
+  const vector<double>& xy_;
+  int n_ = 0, d_ = 2, root_ = -1;
+  vector<BHNode> nodes_;
+  vector<int> order_, tmp_;
+
+  int octant(int i, double cx, double cy, double cz) const {
+    const size_t p = size_t(i) * d_;
+    return (xy_[p] >= cx ? 1 : 0) | (xy_[p + 1] >= cy ? 2 : 0) | (d_ == 3 && xy_[p + 2] >= cz ? 4 : 0);
+  }
+
+  int build(int begin, int end, double cx, double cy, double cz, double half, int depth) {
+    const int ix = int(nodes_.size());
+    nodes_.push_back(BHNode{});
+    BHNode& first = nodes_[size_t(ix)];
+    first.cx = cx; first.cy = cy; first.cz = cz; first.half = half;
+    first.begin = begin; first.end = end; first.mass = end - begin;
+    for (int q = begin; q < end; q++) {
+      int i = order_[size_t(q)];
+      for (int k = 0; k < d_; k++) first.sum[k] += xy_[size_t(i) * d_ + k];
+    }
+    if (end - begin <= kBHLeafCapacity || depth >= kBHMaxDepth) return ix;
+
+    int counts[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    int occupied = 0, only = -1;
+    for (int q = begin; q < end; q++) {
+      int b = octant(order_[size_t(q)], cx, cy, cz);
+      if (!counts[b]++) { occupied++; only = b; }
+    }
+    // Coincident points have no useful subdivision. They are handled as one aggregate (excluding the target below).
+    if (occupied <= 1) {
+      bool identical = true;
+      const int p0 = order_[size_t(begin)];
+      for (int q = begin + 1; q < end && identical; q++) {
+        const int p = order_[size_t(q)];
+        for (int k = 0; k < d_; k++) if (xy_[size_t(p) * d_ + k] != xy_[size_t(p0) * d_ + k]) { identical = false; break; }
+      }
+      if (identical) return ix;
+      (void)only;
+    }
+
+    int offset[8], cursor[8];
+    int at = begin;
+    for (int b = 0; b < 8; b++) { offset[b] = cursor[b] = at; at += counts[b]; }
+    for (int q = begin; q < end; q++) {
+      int i = order_[size_t(q)], b = octant(i, cx, cy, cz);
+      tmp_[size_t(cursor[b]++)] = i;
+    }
+    std::copy(tmp_.begin() + begin, tmp_.begin() + end, order_.begin() + begin);
+
+    nodes_[size_t(ix)].leaf = false;
+    const double ch = half * 0.5;
+    for (int b = 0; b < 8; b++) if (counts[b]) {
+      double x = cx + (b & 1 ? ch : -ch), y = cy + (b & 2 ? ch : -ch);
+      double z = d_ == 3 ? cz + (b & 4 ? ch : -ch) : 0;
+      int child = build(offset[b], offset[b] + counts[b], x, y, z, ch, depth + 1);
+      nodes_[size_t(ix)].child[b] = child;
+    }
+    return ix;
+  }
+
+  static double potentialAt(double d, double exponent) {
+    return exponent == 0 ? std::log(d) : exponent == 1 ? d : std::pow(d, exponent) / exponent;
+  }
+  static double forceFactor(double d, double exponent) { return exponent == 0 ? 1 / (d * d) : exponent == 1 ? 1 / d : std::pow(d, exponent - 2); }
+
+  void aggregate(const BHNode& node, int target, bool contains, double exponent, double gradient[3], double& potential) const {
+    int mass = node.mass - (contains ? 1 : 0);
+    if (mass <= 0) return;
+    const size_t ti = size_t(target) * d_;
+    double dx[3] = {0, 0, 0}, center[3] = {0, 0, 0}, d2 = 1e-24;
+    for (int k = 0; k < d_; k++) {
+      double sum = node.sum[k] - (contains ? xy_[ti + k] : 0.0);
+      center[k] = sum / mass;
+      dx[k] = xy_[ti + k] - center[k];
+      d2 += dx[k] * dx[k];
+    }
+    double d = std::sqrt(d2), f = double(mass) * forceFactor(d, exponent);
+    for (int k = 0; k < d_; k++) gradient[k] -= f * dx[k];
+    potential += double(mass) * potentialAt(d, exponent);
+  }
+
+  void visit(int at, int target, bool contains, double exponent, double theta, double gradient[3], double& potential) const {
+    const BHNode& node = nodes_[size_t(at)];
+    if (node.mass <= 0) return;
+    if (node.leaf) {
+      if (node.mass > kBHLeafCapacity) { aggregate(node, target, contains, exponent, gradient, potential); return; }
+      const size_t ti = size_t(target) * d_;
+      for (int q = node.begin; q < node.end; q++) {
+        int j = order_[size_t(q)];
+        if (j == target) continue;
+        const size_t tj = size_t(j) * d_;
+        double d2 = 1e-24, dx[3] = {0, 0, 0};
+        for (int k = 0; k < d_; k++) { dx[k] = xy_[ti + k] - xy_[tj + k]; d2 += dx[k] * dx[k]; }
+        double d = std::sqrt(d2), f = forceFactor(d, exponent);
+        for (int k = 0; k < d_; k++) gradient[k] -= f * dx[k];
+        potential += potentialAt(d, exponent);
+      }
+      return;
+    }
+    const size_t ti = size_t(target) * d_;
+    double center[3] = {node.sum[0] / node.mass, node.sum[1] / node.mass, d_ == 3 ? node.sum[2] / node.mass : 0};
+    double d2 = 1e-24;
+    for (int k = 0; k < d_; k++) { double v = xy_[ti + k] - center[k]; d2 += v * v; }
+    double d = std::sqrt(d2);
+    if (!contains && d > 0 && (node.half * 2) / d < theta) { aggregate(node, target, false, exponent, gradient, potential); return; }
+    int targetChild = contains ? octant(target, node.cx, node.cy, node.cz) : -1;
+    for (int b = 0; b < 8; b++) if (node.child[b] >= 0)
+      visit(node.child[b], target, contains && b == targetChild, exponent, theta, gradient, potential);
+  }
+};
+}  // namespace
+
 double vosLayout(Network& net, const LayoutOpts& o, Progress prog, const std::atomic<bool>* cancel) {
   int n = net.n();
   int D = o.threeD ? 3 : 2;
@@ -381,12 +549,14 @@ double vosLayout(Network& net, const LayoutOpts& o, Progress prog, const std::at
   csr.nb.resize(size_t(csr.off[n])); cs.resize(size_t(csr.off[n]));
   { vector<int> p(csr.off.begin(), csr.off.end() - 1); for (int e = 0; e < m; e++) { csr.nb[p[ea[e]]] = eb[e]; cs[p[ea[e]]++] = s[e]; csr.nb[p[eb[e]]] = ea[e]; cs[p[eb[e]]++] = s[e]; } }
   double pairs = double(n) * (n - 1) / 2;
+  const bool useBarnesHut = n > std::max(0, o.exactRepulsionLimit);
+  const double bhTheta = std::clamp(o.barnesHutTheta, 0.0, 1.5);
   auto dist = [&](const vector<double>& X, int i, int j) {
     double d2 = 0;
     for (int k = 0; k < D; k++) { double t = X[size_t(i) * D + k] - X[size_t(j) * D + k]; d2 += t * t; }
     return std::sqrt(d2) + 1e-12;
   };
-  auto energyParts = [&](const vector<double>& X, double& At, double& Bt) {
+  auto energyPartsExact = [&](const vector<double>& X, double& At, double& Bt) {
     At = 0; Bt = 0;
     for (int e = 0; e < m; e++) At += s[e] * std::pow(dist(X, ea[e], eb[e]), A) / A;
     if (R == 0) {  // sum of log d = 0.5 log of products of d^2 (one log per ~50 pairs)
@@ -403,6 +573,17 @@ double vosLayout(Network& net, const LayoutOpts& o, Progress prog, const std::at
     }
     for (int i = 0; i < n; i++)
       for (int j = i + 1; j < n; j++) { double d = dist(X, i, j); Bt += R == 1 ? d : std::pow(d, R) / R; }
+  };
+  auto energyParts = [&](const vector<double>& X, double& At, double& Bt) {
+    if (!useBarnesHut) { energyPartsExact(X, At, Bt); return; }
+    At = 0; Bt = 0;
+    for (int e = 0; e < m; e++) At += s[e] * std::pow(dist(X, ea[e], eb[e]), A) / A;
+    BarnesHutTree tree(X, n, D);
+    for (int i = 0; i < n; i++) {
+      double g[3] = {0, 0, 0}, potential = 0;
+      tree.repulsion(i, R, bhTheta, g, potential);
+      Bt += potential * 0.5;
+    }
   };
   auto rescale = [&](vector<double>& X) {
     double At, Bt;
@@ -423,8 +604,9 @@ double vosLayout(Network& net, const LayoutOpts& o, Progress prog, const std::at
       else { for (int k = 0; k < 3; k++) X[i * 3 + k] = rnd() * 2 - 1; }
     }
     rescale(X);
-    // CWTS gradient-descent schedule (networkanalysis GradientDescentVOSLayoutAlgorithm): sequential per-node
-    // moves in random order, step x0.75 on failure and /0.75 after 5 consecutive improvements.
+    // CWTS gradient-descent schedule (networkanalysis GradientDescentVOSLayoutAlgorithm): exact small-map runs
+    // move sequentially in random order; the large-map approximation updates one snapshot synchronously. Both use
+    // step x0.75 on a non-improving objective and /0.75 after 5 consecutive improvements.
     double meanD = 0;
     for (int i = 0; i < n; i++) { double d2 = 0; for (int k = 0; k < D; k++) d2 += sq(X[i * D + k]); meanD += std::sqrt(d2); }
     meanD = meanD / n;
@@ -432,13 +614,50 @@ double vosLayout(Network& net, const LayoutOpts& o, Progress prog, const std::at
     vector<int> order = shuffled(n, rnd);
     double step = meanD, minStep = meanD * 1e-3, Vprev = 1e300;
     int improv = 0;
-    vector<char> done(static_cast<size_t>(n));
-    // 2D fast path: structure-of-arrays copies (kept in sync with X)
+    vector<char> done;
+    // 2D exact-path cache: structure-of-arrays copies are kept in sync with X.
     vector<double> px, py;
-    if (D == 2) { px.resize(size_t(n)); py.resize(size_t(n)); for (int i = 0; i < n; i++) { px[size_t(i)] = X[i * 2]; py[size_t(i)] = X[i * 2 + 1]; } }
+    if (!useBarnesHut) {
+      done.resize(static_cast<size_t>(n));
+      if (D == 2) { px.resize(size_t(n)); py.resize(size_t(n)); for (int i = 0; i < n; i++) { px[size_t(i)] = X[i * 2]; py[size_t(i)] = X[i * 2 + 1]; } }
+    }
     for (int it = 0; it < iters && step >= minStep; it++) {
       if (cancel && cancel->load()) return 1e300;
       double V = 0;
+      if (useBarnesHut) {
+        // Large maps use a Jacobi update from one immutable coordinate snapshot. The tree energy is the same
+        // VOS objective with distant groups represented by their centre of mass; edge attraction stays exact.
+        BarnesHutTree tree(X, n, D);
+        vector<double> next = X;
+        double attractionEnergy = 0, repulsionEnergy = 0;
+        for (int e = 0; e < m; e++) {
+          double d = dist(X, ea[e], eb[e]);
+          attractionEnergy += s[e] * (A == 2 ? d * d * 0.5 : A == 1 ? d : std::pow(d, A) / A);
+        }
+        for (int i = 0; i < n; i++) {
+          if ((i & 255) == 0 && cancel && cancel->load()) return 1e300;
+          double gi[3] = {0, 0, 0};
+          for (int e = csr.off[i]; e < csr.off[i + 1]; e++) {
+            int j = csr.nb[e];
+            double dx[3] = {0, 0, 0}, d2 = 1e-24;
+            for (int k = 0; k < D; k++) { dx[k] = X[size_t(i) * D + k] - X[size_t(j) * D + k]; d2 += dx[k] * dx[k]; }
+            double d = std::sqrt(d2), w = cs[e];
+            double f = w * (A == 2 ? 1 : A == 1 ? 1 / d : std::pow(d, A - 2));
+            for (int k = 0; k < D; k++) gi[k] += f * dx[k];
+          }
+          double repGrad[3] = {0, 0, 0}, potential = 0;
+          tree.repulsion(i, R, bhTheta, repGrad, potential);
+          for (int k = 0; k < D; k++) gi[k] += repGrad[k];
+          repulsionEnergy += potential;
+          if (pinned[size_t(i)]) continue;
+          double gl = 0;
+          for (int k = 0; k < D; k++) gl += gi[k] * gi[k];
+          gl = std::sqrt(gl);
+          if (gl > 1e-300) for (int k = 0; k < D; k++) next[size_t(i) * D + k] -= step * gi[k] / gl;
+        }
+        V = attractionEnergy - 0.5 * repulsionEnergy;
+        X.swap(next);
+      } else {
       std::fill(done.begin(), done.end(), 0);
       for (int oi = 0; oi < n; oi++) {
         int i = order[oi];
@@ -511,6 +730,7 @@ double vosLayout(Network& net, const LayoutOpts& o, Progress prog, const std::at
           for (int k = 0; k < D; k++) X[i * D + k] -= step * gi[k] / gl;
           if (D == 2) { px[size_t(i)] = X[i * 2]; py[size_t(i)] = X[i * 2 + 1]; }
         }
+      }
       }
       if (V < Vprev) { if (++improv >= 5) { improv = 0; step /= 0.75; } }
       else { improv = 0; step *= 0.75; }

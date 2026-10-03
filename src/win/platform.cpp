@@ -1,4 +1,5 @@
 #include "platform.h"
+#include "version.h"
 
 #include <commdlg.h>
 #include <shellapi.h>
@@ -94,6 +95,85 @@ string getClipboardText(HWND owner) {
   return out;
 }
 
+// Text + "HTML Format" (CF_HTML, UTF-8 bytes with the offsets header) + optionally a picture, in one transaction, so
+// Word takes the HTML (formatting, fields, pictures), editors without HTML take the text and picture-only targets the DIB.
+bool setClipboardRich(HWND owner, const string& utf8, const string& cfHtml, int w, int h, const uint8_t* bgra, const string* emf, const string* png) {
+  if (!OpenClipboard(owner)) return false;
+  EmptyClipboard();
+  bool ok = false;
+  if (!utf8.empty()) {
+    std::wstring ws = widen(utf8);
+    HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, (ws.size() + 1) * sizeof(wchar_t));
+    if (g) { memcpy(GlobalLock(g), ws.c_str(), (ws.size() + 1) * sizeof(wchar_t)); GlobalUnlock(g); SetClipboardData(CF_UNICODETEXT, g); ok = true; }
+  }
+  // a vector picture first: Office pastes an Enhanced Metafile as a scalable drawing (Paste Special: Picture (Enhanced Metafile))
+  if (emf && !emf->empty()) {
+    HENHMETAFILE h = SetEnhMetaFileBits(UINT(emf->size()), reinterpret_cast<const BYTE*>(emf->data()));
+    if (h) { SetClipboardData(CF_ENHMETAFILE, h); ok = true; }  // the clipboard owns the handle now
+  }
+  if (png && !png->empty()) {  // the "PNG" format Office applications register: the picture with its transparency
+    UINT fmt = RegisterClipboardFormatW(L"PNG");
+    HGLOBAL g = fmt ? GlobalAlloc(GMEM_MOVEABLE, png->size()) : nullptr;
+    if (g) { memcpy(GlobalLock(g), png->data(), png->size()); GlobalUnlock(g); SetClipboardData(fmt, g); ok = true; }
+  }
+  if (!cfHtml.empty()) {
+    UINT fmt = RegisterClipboardFormatW(L"HTML Format");
+    HGLOBAL g = fmt ? GlobalAlloc(GMEM_MOVEABLE, cfHtml.size() + 1) : nullptr;
+    if (g) { char* p = static_cast<char*>(GlobalLock(g)); memcpy(p, cfHtml.data(), cfHtml.size()); p[cfHtml.size()] = 0; GlobalUnlock(g); SetClipboardData(fmt, g); }
+  }
+  if (bgra && w > 0 && h > 0) {
+    size_t sz = sizeof(BITMAPINFOHEADER) + size_t(w) * size_t(h) * 4;
+    HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, sz);
+    if (g) {
+      uint8_t* p = static_cast<uint8_t*>(GlobalLock(g));
+      BITMAPINFOHEADER bi{};
+      bi.biSize = sizeof bi; bi.biWidth = w; bi.biHeight = h; bi.biPlanes = 1; bi.biBitCount = 32; bi.biCompression = BI_RGB;
+      memcpy(p, &bi, sizeof bi);
+      for (int y = 0; y < h; y++) memcpy(p + sizeof bi + size_t(h - 1 - y) * size_t(w) * 4, bgra + size_t(y) * size_t(w) * 4, size_t(w) * 4);
+      GlobalUnlock(g);
+      SetClipboardData(CF_DIB, g);
+      ok = true;
+    }
+  }
+  CloseClipboard();
+  return ok;
+}
+
+string getClipboardHtml(HWND owner) {
+  UINT fmt = RegisterClipboardFormatW(L"HTML Format");
+  if (!fmt || !IsClipboardFormatAvailable(fmt) || !OpenClipboard(owner)) return "";
+  string out;
+  HANDLE h = GetClipboardData(fmt);
+  if (h) {
+    const char* p = static_cast<const char*>(GlobalLock(h));
+    SIZE_T n = GlobalSize(h);
+    if (p) { out.assign(p, strnlen(p, n)); GlobalUnlock(h); }
+  }
+  CloseClipboard();
+  return out;
+}
+
+string clipboardFilesDir() {
+  wchar_t t[MAX_PATH] = {0};
+  DWORD n = GetTempPathW(MAX_PATH, t);
+  std::wstring d = (n && n < MAX_PATH ? std::wstring(t) : widen(appDataDir()) + L"\\");
+  d += L"VOSStudio";
+  CreateDirectoryW(d.c_str(), nullptr);
+  d += L"\\clip";
+  CreateDirectoryW(d.c_str(), nullptr);
+  return narrow(d);
+}
+
+string fileUrl(const string& path) {
+  string o = "file:///";
+  for (char c : path) {
+    if (c == '\\') o += '/';
+    else if (isalnum(uint8_t(c)) || c == '/' || c == ':' || c == '.' || c == '-' || c == '_' || c == '~') o += c;
+    else { char b[8]; snprintf(b, sizeof b, "%%%02X", uint8_t(c)); o += b; }
+  }
+  return o;
+}
+
 bool setClipboardImage(HWND owner, int w, int h, const uint8_t* bgra) {
   if (!OpenClipboard(owner)) return false;
   EmptyClipboard();
@@ -152,6 +232,37 @@ string reportsDir() {
   return narrow(d);
 }
 
+string attachmentsDir() {
+  wchar_t p[MAX_PATH] = {0};
+  std::wstring base;
+  if (SHGetFolderPathW(nullptr, CSIDL_PERSONAL, nullptr, 0, p) == S_OK) base = p;
+  else base = widen(appDataDir());
+  std::wstring d = base + L"\\VOSStudio";
+  CreateDirectoryW(d.c_str(), nullptr);
+  d += L"\\Attachments";
+  CreateDirectoryW(d.c_str(), nullptr);
+  return narrow(d);
+}
+
+bool ensureDir(const string& path) {
+  std::wstring w = widen(path);
+  if (CreateDirectoryW(w.c_str(), nullptr)) return true;
+  DWORD a = GetFileAttributesW(w.c_str());
+  return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+string exportsDir() {
+  wchar_t p[MAX_PATH] = {0};
+  std::wstring base;
+  if (SHGetFolderPathW(nullptr, CSIDL_PERSONAL, nullptr, 0, p) == S_OK) base = p;
+  else base = widen(appDataDir());
+  std::wstring d = base + L"\\VOSStudio";
+  CreateDirectoryW(d.c_str(), nullptr);
+  d += L"\\Exports";
+  CreateDirectoryW(d.c_str(), nullptr);
+  return narrow(d);
+}
+
 string exeDir() {
   wchar_t p[MAX_PATH] = {0};
   GetModuleFileNameW(nullptr, p, MAX_PATH);
@@ -194,7 +305,7 @@ string httpGet(const string& url, int* status, string* err) {
   uc.lpszUrlPath = path; uc.dwUrlPathLength = DWORD(pathB.size() - 1);
   uc.lpszExtraInfo = extra; uc.dwExtraInfoLength = DWORD(extraB.size() - 1);
   if (!WinHttpCrackUrl(wu.c_str(), 0, 0, &uc)) { if (err) *err = "Invalid URL"; return ""; }
-  HINTERNET s = WinHttpOpen(L"VOSStudio/1.5", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+  HINTERNET s = WinHttpOpen(L"VOSStudio/" VOS_VERSION_WSTR, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
   if (!s) { if (err) *err = "WinHTTP unavailable"; return ""; }
   WinHttpSetTimeouts(s, 8000, 8000, 15000, 30000);
   HINTERNET c = WinHttpConnect(s, host, uc.nPort, 0);
@@ -231,7 +342,7 @@ string httpRequest(const string& method, const string& url, const vector<std::pa
   uc.lpszUrlPath = pathB.data(); uc.dwUrlPathLength = DWORD(pathB.size() - 1);
   uc.lpszExtraInfo = extraB.data(); uc.dwExtraInfoLength = DWORD(extraB.size() - 1);
   if (!WinHttpCrackUrl(wu.c_str(), 0, 0, &uc)) { if (err) *err = "Invalid address"; return ""; }
-  HINTERNET s = WinHttpOpen(L"VOSStudio/1.5", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+  HINTERNET s = WinHttpOpen(L"VOSStudio/" VOS_VERSION_WSTR, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
   if (!s) { if (err) *err = "WinHTTP unavailable"; return ""; }
   WinHttpSetTimeouts(s, 10000, 15000, 30000, timeoutMs);
   HINTERNET c = WinHttpConnect(s, host, uc.nPort, 0);
@@ -265,6 +376,114 @@ string httpRequest(const string& method, const string& url, const vector<std::pa
   if (c) WinHttpCloseHandle(c);
   WinHttpCloseHandle(s);
   return out;
+}
+
+bool httpDownload(const string& url, const vector<std::pair<string, string>>& headers, const string& path, HttpDownload& out,
+                  const std::function<bool(const char*, size_t)>& accept, const std::function<bool(long long, long long)>& progress,
+                  long long maxBytes, int timeoutMs, const vector<string>& wantHeaders) {
+  out = HttpDownload();
+  std::wstring wu = widen(url);
+  URL_COMPONENTS uc{};
+  uc.dwStructSize = sizeof uc;
+  std::vector<wchar_t> pathB(wu.size() + 16, 0), extraB(wu.size() + 16, 0);
+  wchar_t host[256] = {0};
+  uc.lpszHostName = host; uc.dwHostNameLength = 255;
+  uc.lpszUrlPath = pathB.data(); uc.dwUrlPathLength = DWORD(pathB.size() - 1);
+  uc.lpszExtraInfo = extraB.data(); uc.dwExtraInfoLength = DWORD(extraB.size() - 1);
+  if (!WinHttpCrackUrl(wu.c_str(), 0, 0, &uc)) { out.err = "invalid address"; return false; }
+  HINTERNET s = WinHttpOpen(L"VOSStudio/" VOS_VERSION_WSTR, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+  if (!s) { out.err = "WinHTTP unavailable"; return false; }
+  WinHttpSetTimeouts(s, 10000, 15000, 30000, timeoutMs);
+  DWORD redirects = 10;
+  WinHttpSetOption(s, WINHTTP_OPTION_MAX_HTTP_AUTOMATIC_REDIRECTS, &redirects, sizeof redirects);
+  HINTERNET c = WinHttpConnect(s, host, uc.nPort, 0);
+  std::wstring full = std::wstring(pathB.data()) + extraB.data();
+  HINTERNET r = c ? WinHttpOpenRequest(c, L"GET", full.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                       uc.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0)
+                  : nullptr;
+  std::wstring hdr;
+  for (auto& h : headers) hdr += widen(h.first) + L": " + widen(h.second) + L"\r\n";
+  bool ok = false;
+  bool sent = r && WinHttpSendRequest(r, hdr.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : hdr.c_str(), hdr.empty() ? 0 : DWORD(-1L), WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+  if (sent && WinHttpReceiveResponse(r, nullptr)) {
+    DWORD code = 0, sz = sizeof code;
+    WinHttpQueryHeaders(r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &code, &sz, WINHTTP_NO_HEADER_INDEX);
+    out.status = int(code);
+    auto strHeader = [&](DWORD which, const wchar_t* name) {
+      DWORD n = 0;
+      WinHttpQueryHeaders(r, which, name, WINHTTP_NO_OUTPUT_BUFFER, &n, WINHTTP_NO_HEADER_INDEX);
+      if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || n == 0) return string();
+      std::wstring buf(n / sizeof(wchar_t) + 1, L'\0');
+      if (!WinHttpQueryHeaders(r, which, name, &buf[0], &n, WINHTTP_NO_HEADER_INDEX)) return string();
+      buf.resize(n / sizeof(wchar_t));
+      return narrow(buf);
+    };
+    out.contentType = lower(strHeader(WINHTTP_QUERY_CONTENT_TYPE, WINHTTP_HEADER_NAME_BY_INDEX));
+    size_t semi = out.contentType.find(';');
+    if (semi != string::npos) out.contentType = trim(out.contentType.substr(0, semi));
+    string len = strHeader(WINHTTP_QUERY_CONTENT_LENGTH, WINHTTP_HEADER_NAME_BY_INDEX);
+    if (!len.empty()) out.length = atoll(len.c_str());
+    for (auto& w : wantHeaders) { string v = strHeader(WINHTTP_QUERY_CUSTOM, widen(w).c_str()); if (!v.empty()) out.headers[lower(w)] = trim(v); }
+    {
+      DWORD n = 0;
+      WinHttpQueryOption(r, WINHTTP_OPTION_URL, nullptr, &n);
+      if (n > 0) { std::wstring u(n / sizeof(wchar_t) + 1, L'\0'); if (WinHttpQueryOption(r, WINHTTP_OPTION_URL, &u[0], &n)) { u.resize(wcslen(u.c_str())); out.finalUrl = narrow(u); } }
+    }
+    HANDLE f = INVALID_HANDLE_VALUE;
+    string first;
+    bool refused = false, cancelled = false, failedWrite = false;
+    DWORD avail = 0;
+    while (WinHttpQueryDataAvailable(r, &avail) && avail) {
+      string chunk(avail, '\0');
+      DWORD got = 0;
+      if (!WinHttpReadData(r, &chunk[0], avail, &got)) break;
+      if (got == 0) continue;
+      if (!out.accepted) {  // the first bytes decide (buffer until a kilobyte is there or the body is smaller)
+        first.append(chunk.data(), got);
+        if (first.size() < 1024 && (out.length < 0 || (long long)first.size() < out.length)) continue;
+        if (!accept(first.data(), first.size())) { refused = true; out.first = first.substr(0, 256); break; }
+        out.accepted = true;
+        f = CreateFileW(widen(path).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (f == INVALID_HANDLE_VALUE) { failedWrite = true; break; }
+        DWORD wr = 0;
+        if (!WriteFile(f, first.data(), DWORD(first.size()), &wr, nullptr) || wr != first.size()) { failedWrite = true; break; }
+        out.received = (long long)first.size();
+      } else {
+        DWORD wr = 0;
+        if (!WriteFile(f, chunk.data(), got, &wr, nullptr) || wr != got) { failedWrite = true; break; }
+        out.received += got;
+      }
+      if (out.received > maxBytes) { out.err = "larger than the limit"; break; }
+      if (progress && !progress(out.received, out.length)) { cancelled = true; break; }
+    }
+    if (!out.accepted && !refused && !first.empty() && !failedWrite) {  // a body smaller than a kilobyte that ended: judge it now
+      if (accept(first.data(), first.size())) {
+        f = CreateFileW(widen(path).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        DWORD wr = 0;
+        if (f != INVALID_HANDLE_VALUE && WriteFile(f, first.data(), DWORD(first.size()), &wr, nullptr) && wr == first.size()) { out.accepted = true; out.received = (long long)first.size(); }
+        else failedWrite = true;
+      } else { refused = true; out.first = first.substr(0, 256); }
+    }
+    if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
+    if (!out.accepted && !refused && first.empty() && out.err.empty() && !failedWrite && !cancelled) out.err = "empty answer";
+    if (refused) out.err = "refused";
+    else if (failedWrite) out.err = "the file could not be written";
+    else if (cancelled) out.err = "cancelled";
+    else if (out.err.empty() && out.accepted) {
+      out.complete = out.length < 0 || out.received >= out.length;
+      if (!out.complete) out.err = "the transfer stopped early";
+      ok = out.complete;
+    }
+    if (!ok && out.accepted) DeleteFileW(widen(path).c_str());
+  } else {
+    DWORD e = GetLastError();
+    out.err = e == ERROR_WINHTTP_TIMEOUT ? "the request timed out" : e == ERROR_WINHTTP_NAME_NOT_RESOLVED ? "the server name could not be resolved"
+            : e == ERROR_WINHTTP_CANNOT_CONNECT ? "the connection was refused" : e == ERROR_WINHTTP_SECURE_FAILURE ? "the secure connection failed" : "network error " + std::to_string(e);
+  }
+  if (r) WinHttpCloseHandle(r);
+  if (c) WinHttpCloseHandle(c);
+  WinHttpCloseHandle(s);
+  return ok;
 }
 
 string protectSecret(const string& plain) {

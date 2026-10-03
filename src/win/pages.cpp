@@ -76,11 +76,12 @@ float App::chartBox(Lay& L, const string& key, const ChartDef& def, float h) {
   float cw = cr.w / s, chh = cr.h / s;
   if (chartFresh > 0 || ce.frame == 0 || ce.sig != sig || ce.w != cw || ce.h != chh || ce.dark != ui.dark) {
     ce.sc = def.make(cw, chh, t);
-    ce.sig = sig; ce.w = cw; ce.h = chh; ce.dark = ui.dark;
+    ce.sig = sig; ce.w = cw; ce.h = chh; ce.dark = ui.dark; ce.gen++;
   }
   ce.frame = std::max(1, frameNo);
   const Scene& sc = ce.sc;
-  drawScene(g.dc.get(), g.d2f.get(), g.dw.get(), g, sc, cr.x, cr.y, s);
+  drawChartCached(ck, ce.gen, sc, cr.x, cr.y, s);
+  addChartHoverRegion(sc, cr, cr.x, cr.y, s, ui.id("chart-hover:" + key));
   if (ui.mouseIn(cr) && !ui.anyPopup() && !ui.anyModal()) chartHover(sc, cr.x, cr.y, s);
   if (def.onClick && ui.mouseIn(cr) && !ui.anyPopup() && !ui.anyModal()) {
     int tag = hitTag(sc, (ui.in.mx - cr.x) / s, (ui.in.my - cr.y) / s);
@@ -154,6 +155,7 @@ void drawSceneCached(Gfx& g, SceneCache& c, const Scene& sc, float ox, float oy,
       D2D1_PIXEL_FORMAT pf = D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED);
       if (FAILED(g.dc->CreateCompatibleRenderTarget(&sz, &px, &pf, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, c.rt.put()))) { c.rt.reset(); direct(); return; }
       c.rt->SetDpi(96, 96);
+      c.rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);  // as the window (no ClearType fringes on the transparent bitmap)
       c.w = w; c.h = h;
     }
     c.rt->BeginDraw();
@@ -166,7 +168,30 @@ void drawSceneCached(Gfx& g, SceneCache& c, const Scene& sc, float ox, float oy,
   }
   g.dc->DrawBitmap(c.bmp.get(), D2D1::RectF(ox, oy, ox + float(w), oy + float(h)), 1.f, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
 }
+struct ChartBmp { SceneCache c; int used = 0; };
+std::unordered_map<string, ChartBmp> s_chartBmp;  // one bitmap per chart shown (see App::drawChartCached)
 }  // namespace
+
+// The charts of the panel pages and of the main area are Scenes of a few hundred paths and texts each; drawing them
+// vector by vector on every frame (with a fresh DirectWrite layout per label) was the largest remaining per-frame
+// cost of the Analyse, Trends and Actors pages. Each chart is rendered once into an offscreen bitmap that is blitted
+// until its scene is rebuilt (gen), its pixel size or the theme changes. Hover marks are drawn on top as before.
+void App::drawChartCached(const string& cacheKey, unsigned gen, const Scene& sc, float ox, float oy, float k) {
+  ChartBmp& e = s_chartBmp[cacheKey];
+  e.used = frameNo;
+  drawSceneCached(g, e.c, sc, ox, oy, k, false, cacheKey + "|g" + std::to_string(gen) + (ui.dark ? "|d" : "|l"));
+  if (s_chartBmp.size() > 16 || frameNo % 300 == 0) {  // drop bitmaps of charts that left the screen
+    for (auto it = s_chartBmp.begin(); it != s_chartBmp.end();) it = (&it->second != &e && frameNo - it->second.used > 120) ? s_chartBmp.erase(it) : std::next(it);
+  }
+  // and keep the whole cache under a pixel budget (large panes on a 4K display): the least recently drawn go first
+  auto bytes = [&]() { size_t n = 0; for (auto& kv : s_chartBmp) n += size_t(kv.second.c.w) * size_t(kv.second.c.h) * 4; return n; };
+  while (s_chartBmp.size() > 1 && bytes() > (size_t(64) << 20)) {
+    auto victim = s_chartBmp.end();
+    for (auto it = s_chartBmp.begin(); it != s_chartBmp.end(); ++it) if (&it->second != &e && (victim == s_chartBmp.end() || it->second.used < victim->second.used)) victim = it;
+    if (victim == s_chartBmp.end()) break;
+    s_chartBmp.erase(victim);
+  }
+}
 
 void App::drawFigureZoom() {
   float s = ui.s;
@@ -321,9 +346,18 @@ void App::drawFigureZoom() {
 // ------------------------------------------------------------------ "?" help texts for option labels
 void App::registerHelp() {
   auto& h = ui.helpTexts;
+  // Live AI settings
+  h["The app detects when I stop talking"] = "On: the app watches the microphone level, tells the model when you start and stop talking (activityStart / activityEnd) and turns the server's own voice detection off. "
+                                              "Off: the server decides when you have finished, which on the 3.x Live models sometimes never happens: your words are transcribed but no answer comes. "
+                                              "The status line shows \"Hearing you\" while the app hears you and \"Thinking\" once it has told the model you are done. Takes effect at the next connection.";
+  h["Let me interrupt it by talking"] = "On: the microphone stays live while the model speaks, so any sound interrupts it (use headphones, or it hears itself). "
+                                        "Off: nothing is sent while it speaks, but clear, sustained speech still interrupts it (the app watches the microphone and stops the playback).";
+  h["Google Search grounding"] = "Lets the model search the web. Needs a key with billing; with a free key the server refuses the session and the option switches itself off.";
+  h["Acts on its own, without asking"] = "Loads data, builds maps and changes the project without an approval prompt for each step.";
   // export
   h["Transparent background"] = "Leaves the background empty in PNG, SVG and PDF. Applies to the figure, single views and charts.";
   h["PDF: one page per plot"] = "Each selected view goes on its own page at the figure size, instead of all views on one page.";
+  h["Hybrid SVG/PDF (native text)"] = "Optional for SVG/PDF exports: non-text artwork is rasterized at the PNG resolution (DPI) setting and embedded, while text remains native/selectable. Contiguous artwork layers preserve paint order and transparency; text links and styling are retained. PNG export is unchanged.";
   // build
   h["Min. citations per document"] = "Only documents cited at least this often contribute to the map.";
   h["Max. items to map"] = "Upper limit on the number of items; the strongest items are kept when more pass the threshold.";
@@ -396,6 +430,8 @@ void App::registerHelp() {
 // =====================================================================================
 void App::pageData(Lay& L) {
   float s = ui.s;
+  Rect nav = L.row(30 * s);
+  if (ui.segmented(nav, {"Overview", "Sources", "Search", "Clean"}, dataSection, "datasection")) ui.scrollSet("page0", 0);
   // grouped list (label left, value right, hairline separators)
   auto group = [&](const vector<std::pair<string, string>>& rows) {
     float rh = 28 * s;
@@ -409,7 +445,7 @@ void App::pageData(Lay& L) {
       ui.text({r.x + r.w * 0.4f, r.y, r.w * 0.6f, r.h}, rows[i].second, 12.5f * s, ui.c.textDim, AL_RIGHT);
     }
   };
-  if (!hasCorpus()) {
+  if (dataSection == 0 && !hasCorpus()) {
     sectionTitle(L, "Import");
     Rect drop = L.row(104 * s);
     bool hov = false;
@@ -424,12 +460,14 @@ void App::pageData(Lay& L) {
     auto c2 = cols(L.row(30 * s), 2, 8 * s);
     if (ui.button(c2[0], "WoS Sample", BTN_NORMAL)) cmdSample(false);
     if (ui.button(c2[1], "Scopus Sample", BTN_NORMAL)) cmdSample(true);
-  } else {
+  } else if (dataSection == 0 && hasCorpus()) {
     const QualityReport& q = statQuality();
     sectionTitle(L, "Summary");
     string years = q.yearMin ? std::to_string(q.yearMin) + "\xE2\x80\x93" + std::to_string(q.yearMax) : "n/a";
     group({{"Records", fmtInt(q.records)}, {"Years", years}, {"Sources", fmtInt(q.sources)}, {"Authors", fmtInt(q.authors)},
            {"Cited references", fmtInt(q.totalRefs)}, {"Citations per document", fmtNum(q.citesPerDoc, 1)}});
+    if (ui.button(L.row(30 * s), "Browse the Bibliography", BTN_NORMAL, "table")) openPapers();
+    ui.tip("Every record as a sortable, filterable table in the Bibliography workspace  (Ctrl+T)");
     // coverage
     sectionTitle(L, "Field coverage", "Share of records with each field. Low coverage limits the analyses that use it.");
     struct Cov { const char* l; double v; const char* need; };
@@ -448,11 +486,48 @@ void App::pageData(Lay& L) {
       ui.behave(tid, r);
       ui.tipFor(tid, string("Needed for ") + c.need);
     }
-    sectionTitle(L, "Files");
-    vector<std::pair<string, string>> fr;
-    for (auto& f : P->corpus.files) fr.push_back({truncate(f.name, 36), string(formatLabel(f.format)) + "  \xC2\xB7  " + fmtInt(f.records)});
-    if (P->corpus.duplicatesRemoved) fr.push_back({"Duplicates merged", fmtInt(P->corpus.duplicatesRemoved)});
-    if (!fr.empty()) group(fr);
+  }
+  if (dataSection == 1) {
+    if (!hasCorpus()) {
+      sectionTitle(L, "Sources");
+      emptyHint(L, "folder", "No imported sources", "Import reference files to see their provenance, duplicates, and records flow here.");
+      if (ui.button(L.row(30 * s), "Import bibliographic files…", BTN_PRIMARY, "plus")) cmdOpenFiles();
+    } else {
+    sectionTitle(L, "Files", "Every imported file, with the records it brought. Records that appear in more than one file are merged (duplicates); the \xC3\x97 removes one file without touching the records the other files also contain.");
+    {
+      bool prov = P->corpus.provenanceKnown();
+      int removeIdx = -1;
+      for (size_t k = 0; k < P->corpus.files.size(); k++) {
+        const SourceFile& f = P->corpus.files[k];
+        Rect r = L.row(36 * s);
+        ui.pushId("file" + std::to_string(k));
+        Rect xb{r.r() - 24 * s, r.y + 2 * s, 22 * s, 22 * s};
+        bool canRemove = prov && !busy() && k < 63;
+        if (ui.iconButton(xb, "x", canRemove ? "Remove this file (records shared with other files stay)" : prov ? "Wait for the current task" : "Saved by an older version: import the files again to remove them one by one", false, canRemove)) removeIdx = int(k);
+        ui.text({r.x, r.y, r.w - 30 * s, 18 * s}, truncate(f.name, 40), 12.5f * s, ui.c.text);
+        string det = string(formatLabel(f.format)) + "  \xC2\xB7  " + plural(f.records, "record");
+        if (prov && P->corpus.files.size() > 1) {
+          Corpus::FileStat fs = P->corpus.fileStat(k);
+          det += "  \xC2\xB7  " + fmtInt(fs.unique) + " only here";
+          if (fs.shared) det += ", " + fmtInt(fs.shared) + " shared";
+          int dropped = f.records - fs.unique - fs.shared;
+          if (dropped > 0) det += ", " + fmtInt(dropped) + " duplicate" + (dropped == 1 ? "" : "s");
+        }
+        ui.text({r.x, r.y + 17 * s, r.w - 30 * s, 16 * s}, det, 11 * s, ui.c.textDim);
+        ui.popId();
+      }
+      if (P->corpus.duplicatesRemoved) group({{"Duplicates merged", fmtInt(P->corpus.duplicatesRemoved)}});
+      if (removeIdx >= 0) {
+        string name = P->corpus.files[size_t(removeIdx)].name;
+        int gone = P->removeFile(removeIdx);
+        if (gone >= 0) {
+          undoStack.clear(); redoStack.clear();
+          pageStateReset();
+          if (hasMap()) { P->metricsValid = false; styleDirty = true; }
+          ui.toast("File removed", fileName(name) + ": " + plural(gone, "record") + " removed" + (P->corpus.empty() ? "." : "; the records other files also contain stay."), 1, 5);
+        }
+      }
+    }
     auto c3 = cols(L.row(30 * s), 2, 8 * s);
     if (ui.button(c3[0], "Add Files\xE2\x80\xA6", BTN_NORMAL, "", !busy())) cmdOpenFiles();
     if (ui.button(c3[1], "Remove All", BTN_DANGER, "", !busy())) { P->clearCorpus(); pageStateReset(); }
@@ -464,247 +539,269 @@ void App::pageData(Lay& L) {
       d.make = [this](double w, double h, const ChartTheme& t) { return chartFlow(recordsFlow(), w, h, t); };
       chartBox(L, "flow", d, 300);
     }
+    }
   }
-  // OpenAlex
-  sectionTitle(L, "Search OpenAlex",
-               "Fetch works directly from the free OpenAlex API.\n\nSeveral keywords: separate them with a semicolon ( ; ) or put each on its own line, e.g.\n   bibliometrics; science mapping; \"citation analysis\"\n\n"
-               "Any term: each term is searched separately and the results are merged; works found by several terms are kept once.\nAll terms: works must match every term (combined with AND).\n\n"
-               "Inside one term you can use quotes for exact phrases and AND / OR / NOT in capitals. Pasting DOIs fetches exactly those works.");
-  if (ui.button(L.row(30 * s), "Plan the Search with AI\xE2\x80\xA6", BTN_NORMAL, "sparkle")) {
-    if (!trim(oaQuery).empty() && aiInput.empty()) aiInput = trim(oaQuery);
-    aiRun(ai::Task::Search, "");
-  }
-  {
-    Rect kr = L.row(30 * s);
-    ui.segmented(kr, {"Keywords", "Semantic"}, oaKind, "oakind");
-  }
-  if (oaKind == 1) {
-    // one query per row; each row is one semantic search (at most 50 works)
-    int remove = -1;
-    for (size_t i = 0; i < oaSemQueries.size(); i++) {
+  if (dataSection == 2) {
+    // OpenAlex
+    sectionTitle(L, "Search OpenAlex",
+                 "Fetch works directly from the free OpenAlex API.\n\nSeveral keywords: separate them with a semicolon ( ; ) or put each on its own line, e.g.\n   bibliometrics; science mapping; \"citation analysis\"\n\n"
+                 "Any term: each term is searched separately and the results are merged; works found by several terms are kept once.\nAll terms: works must match every term (combined with AND).\n\n"
+                 "Inside one term you can use quotes for exact phrases and AND / OR / NOT in capitals. Pasting DOIs fetches exactly those works.");
+    if (ui.button(L.row(30 * s), "Plan the Search with AI\xE2\x80\xA6", BTN_NORMAL, "sparkle")) {
+      if (!trim(oaQuery).empty() && aiInput.empty()) aiInput = trim(oaQuery);
+      aiRun(ai::Task::Search, "");
+    }
+    {
+      Rect kr = L.row(30 * s);
+      ui.segmented(kr, {"Keywords", "Semantic"}, oaKind, "oakind");
+    }
+    if (oaKind == 1) {
+      // one query per row; each row is one semantic search (at most 50 works)
+      int remove = -1;
+      for (size_t i = 0; i < oaSemQueries.size(); i++) {
+        Rect qr = L.row(32 * s);
+        bool submitted = false;
+        ui.pushId("sq" + std::to_string(i));
+        Rect ir = oaSemQueries.size() > 1 ? Rect{qr.x, qr.y, qr.w - 34 * s, qr.h} : qr;
+        ui.textInput(ir, "q", oaSemQueries[i], i == 0 ? "Describe the topic" : "Another angle on the topic", &submitted, "search");
+        if (oaSemQueries.size() > 1 && ui.iconButton({qr.r() - 30 * s, qr.y + 2 * s, 28 * s, 28 * s}, "x", "Remove this query")) remove = int(i);
+        ui.popId();
+        if (submitted && !busy()) cmdOpenAlex();
+      }
+      if (remove >= 0) oaSemQueries.erase(oaSemQueries.begin() + remove);
+      if (oaSemQueries.size() < 8) {
+        Rect ar = L.row(24 * s);
+        string l = "Add query";
+        float lw = ui.textW(l, 12 * s, 550) + 22 * s;
+        Rect lr{ar.x, ar.y, lw, ar.h};
+        uint64_t aid = ui.id("sqadd");
+        bool ah = false;
+        if (ui.behave(aid, lr, &ah)) oaSemQueries.push_back("");
+        ui.icon("plus", lr.x + 6 * s, lr.y + lr.h / 2, 12 * s, ui.c.accent, 1.8f);
+        ui.text({lr.x + 18 * s, lr.y, lw, lr.h}, l, 12 * s, ah ? ui.c.accent.withA(0.8f) : ui.c.accent, AL_LEFT, 550);
+      }
+      Rect f = field(ui, L, "Strategy", 30, 0.3f);
+      int st = oaSemStrategy == 1 ? 0 : 1;
+      if (ui.segmented(f, {"Expand", "Direct"}, st, "oasem")) oaSemStrategy = st == 0 ? 1 : 0;
+      if (oaSemStrategy == 1) {
+        Rect f2 = field(ui, L, "Keep", 30, 0.3f);
+        ui.segmented(f2, {"More", "Balanced", "Closest"}, oaStrict, "oastrict");
+      }
+      if (openAlexKey().empty()) {
+        Rect hr = L.row(24 * s);
+        ui.text({hr.x, hr.y, hr.w - 90 * s, hr.h}, "No API key", 12 * s, ui.c.textDim);
+        string kl = "Add Key\xE2\x80\xA6";
+        float kw = ui.textW(kl, 12 * s, 500);
+        Rect kr{hr.r() - kw, hr.y, kw, hr.h};
+        uint64_t kid = ui.id("oaaddkey");
+        bool kh = false;
+        if (ui.behave(kid, kr, &kh)) settingsWanted = true;
+        ui.text(kr, kl, 12 * s, kh ? ui.c.accentHover : ui.c.accent, AL_RIGHT, 500);
+        ui.tipFor(kid, "A free key raises the daily OpenAlex allowance. Recommended for regular use.");
+      }
+    } else {
       Rect qr = L.row(32 * s);
       bool submitted = false;
-      ui.pushId("sq" + std::to_string(i));
-      Rect ir = oaSemQueries.size() > 1 ? Rect{qr.x, qr.y, qr.w - 34 * s, qr.h} : qr;
-      ui.textInput(ir, "q", oaSemQueries[i], i == 0 ? "Describe the topic" : "Another angle on the topic", &submitted, "search");
-      if (oaSemQueries.size() > 1 && ui.iconButton({qr.r() - 30 * s, qr.y + 2 * s, 28 * s, 28 * s}, "x", "Remove this query")) remove = int(i);
-      ui.popId();
+      ui.textInput(qr, "oaq", oaQuery, "keyword one; keyword two; \"exact phrase\"", &submitted, "search");
       if (submitted && !busy()) cmdOpenAlex();
-    }
-    if (remove >= 0) oaSemQueries.erase(oaSemQueries.begin() + remove);
-    if (oaSemQueries.size() < 8) {
-      Rect ar = L.row(24 * s);
-      string l = "Add query";
-      float lw = ui.textW(l, 12 * s, 550) + 22 * s;
-      Rect lr{ar.x, ar.y, lw, ar.h};
-      uint64_t aid = ui.id("sqadd");
-      bool ah = false;
-      if (ui.behave(aid, lr, &ah)) oaSemQueries.push_back("");
-      ui.icon("plus", lr.x + 6 * s, lr.y + lr.h / 2, 12 * s, ui.c.accent, 1.8f);
-      ui.text({lr.x + 18 * s, lr.y, lw, lr.h}, l, 12 * s, ah ? ui.c.accent.withA(0.8f) : ui.c.accent, AL_LEFT, 550);
-    }
-    Rect f = field(ui, L, "Strategy", 30, 0.3f);
-    int st = oaSemStrategy == 1 ? 0 : 1;
-    if (ui.segmented(f, {"Expand", "Direct"}, st, "oasem")) oaSemStrategy = st == 0 ? 1 : 0;
-    if (oaSemStrategy == 1) {
-      Rect f2 = field(ui, L, "Keep", 30, 0.3f);
-      ui.segmented(f2, {"More", "Balanced", "Closest"}, oaStrict, "oastrict");
-    }
-    if (openAlexKey().empty()) {
-      Rect hr = L.row(24 * s);
-      ui.text({hr.x, hr.y, hr.w - 90 * s, hr.h}, "No API key", 12 * s, ui.c.textDim);
-      string kl = "Add Key\xE2\x80\xA6";
-      float kw = ui.textW(kl, 12 * s, 500);
-      Rect kr{hr.r() - kw, hr.y, kw, hr.h};
-      uint64_t kid = ui.id("oaaddkey");
-      bool kh = false;
-      if (ui.behave(kid, kr, &kh)) settingsWanted = true;
-      ui.text(kr, kl, 12 * s, kh ? ui.c.accentHover : ui.c.accent, AL_RIGHT, 500);
-      ui.tipFor(kid, "A free key raises the daily OpenAlex allowance. Recommended for regular use.");
-    }
-  } else {
-    Rect qr = L.row(32 * s);
-    bool submitted = false;
-    ui.textInput(qr, "oaq", oaQuery, "keyword one; keyword two; \"exact phrase\"", &submitted, "search");
-    if (submitted && !busy()) cmdOpenAlex();
-    // chips: one per term (x removes it); shows per-term totals after a fetch
-    vector<string> terms = openAlexTerms(oaQuery);
-    if (terms.size() > 1 || (!oaCounts.empty() && !terms.empty())) {
-      float x = L.x, y = L.y, ch = 24 * s;
-      string removeTerm;
-      for (auto& t : terms) {
-        string cnt;
-        for (auto& c : oaCounts) if (c.term == t) cnt = "  " + fmtInt(c.total);
-        string lbl = truncate(t, 34);
-        float w = ui.textW(lbl, 11.5f * s, 550) + ui.textW(cnt, 11 * s) + 34 * s;
-        if (x + w > L.x + L.w && x > L.x) { x = L.x; y += ch + 5 * s; }
-        Rect cr{x, y, std::min(w, L.w), ch};
-        ui.fill(cr, ui.c.active, 6 * s);
-        ui.text({cr.x + 10 * s, cr.y, cr.w - 30 * s, ch}, lbl, 11.5f * s, ui.c.text, AL_LEFT, 500);
-        if (!cnt.empty()) ui.text({cr.x + 10 * s, cr.y, cr.w - 28 * s, ch}, cnt, 11 * s, ui.c.textDim, AL_RIGHT);
-        ui.pushId("chip" + t);
-        if (ui.iconButton({cr.r() - 22 * s, cr.y + 2 * s, 20 * s, 20 * s}, "x", "Remove this term")) removeTerm = t;
-        ui.popId();
-        x += cr.w + 5 * s;
+      // chips: one per term (x removes it); shows per-term totals after a fetch
+      vector<string> terms = openAlexTerms(oaQuery);
+      if (terms.size() > 1 || (!oaCounts.empty() && !terms.empty())) {
+        float x = L.x, y = L.y, ch = 24 * s;
+        string removeTerm;
+        for (auto& t : terms) {
+          string cnt;
+          for (auto& c : oaCounts) if (c.term == t) cnt = "  " + fmtInt(c.total);
+          string lbl = truncate(t, 34);
+          float w = ui.textW(lbl, 11.5f * s, 550) + ui.textW(cnt, 11 * s) + 34 * s;
+          if (x + w > L.x + L.w && x > L.x) { x = L.x; y += ch + 5 * s; }
+          Rect cr{x, y, std::min(w, L.w), ch};
+          ui.fill(cr, ui.c.active, 6 * s);
+          ui.text({cr.x + 10 * s, cr.y, cr.w - 30 * s, ch}, lbl, 11.5f * s, ui.c.text, AL_LEFT, 500);
+          if (!cnt.empty()) ui.text({cr.x + 10 * s, cr.y, cr.w - 28 * s, ch}, cnt, 11 * s, ui.c.textDim, AL_RIGHT);
+          ui.pushId("chip" + t);
+          if (ui.iconButton({cr.r() - 22 * s, cr.y + 2 * s, 20 * s, 20 * s}, "x", "Remove this term")) removeTerm = t;
+          ui.popId();
+          x += cr.w + 5 * s;
+        }
+        L.y = y + ch + 8 * s;
+        if (!removeTerm.empty()) {
+          string rebuilt;
+          for (auto& t : terms) if (t != removeTerm) rebuilt += (rebuilt.empty() ? "" : "; ") + t;
+          oaQuery = rebuilt;
+        }
       }
-      L.y = y + ch + 8 * s;
-      if (!removeTerm.empty()) {
-        string rebuilt;
-        for (auto& t : terms) if (t != removeTerm) rebuilt += (rebuilt.empty() ? "" : "; ") + t;
-        oaQuery = rebuilt;
+      if (terms.size() > 1) {
+        Rect f = field(ui, L, "Match", 30, 0.3f);
+        ui.segmented(f, {"Any term", "All terms"}, oaMode, "oamode");
+      }
+      Rect f2 = field(ui, L, "Search in", 30, 0.3f);
+      ui.combo(f2, "oafield", {"Title, abstract & full text", "Title & abstract", "Title only"}, oaField);
+    }
+    {
+      auto c3 = cols(L.row(30 * s), 3, 6 * s);
+      ui.textInput(c3[0], "oafrom", oaFrom, "From year");
+      ui.textInput(c3[1], "oato", oaTo, "To year");
+      if (oaKind == 1 && oaSemStrategy == 0) ui.text(c3[2], "50 per query", 12 * s, ui.c.textDim, AL_CENTER);
+      else {
+        string ml = oaKind == 0 && openAlexTerms(oaQuery).size() > 1 && oaMode == 0 ? "Max/term" : "Max";
+        float mw = ui.textW(ml, 12 * s) + 8 * s;
+        ui.text({c3[2].x, c3[2].y, mw, c3[2].h}, ml, 12 * s, ui.c.textDim);
+        ui.textInput({c3[2].x + mw, c3[2].y, c3[2].w - mw, c3[2].h}, "oamax", oaMax, "500");
       }
     }
-    if (terms.size() > 1) {
-      Rect f = field(ui, L, "Match", 30, 0.3f);
-      ui.segmented(f, {"Any term", "All terms"}, oaMode, "oamode");
+    if (hasCorpus()) ui.toggle(L.row(26 * s), "Append to the current records", oaAppend);
+    if (ui.button(L.row(34 * s), busy() && jobLabel.find("OpenAlex") != string::npos ? "Fetching\xE2\x80\xA6" : "Fetch Works", BTN_PRIMARY, "", !busy())) cmdOpenAlex();
+    if (!oaLastRecs.empty()) {
+      Rect hr = L.row(18 * s);
+      ui.text(hr, "Export the last " + plural(long(oaLastRecs.size()), "work"), 11.5f * s, ui.c.textDim);
+      auto c4 = cols(L.row(28 * s), 5, 5 * s);
+      ui.pushId("oaexp");
+      if (ui.button(c4[0], "WoS", BTN_NORMAL, "download")) cmdExportRecords(true, "wos");
+      ui.tip("Web of Science tagged text, for VOSviewer, bibliometrix and CiteSpace");
+      if (ui.button(c4[1], "RIS", BTN_NORMAL, "download")) cmdExportRecords(true, "ris");
+      ui.tip("RIS, for Zotero, EndNote and Mendeley");
+      if (ui.button(c4[2], "BibTeX", BTN_NORMAL, "download")) cmdExportRecords(true, "bib");
+      ui.tip("BibTeX, for LaTeX and Overleaf");
+      if (ui.button(c4[3], "CSV", BTN_NORMAL, "download")) cmdExportRecords(true, "csv");
+      ui.tip("CSV with Scopus column names (Excel, R, Python)");
+      if (ui.button(c4[4], "JSON", BTN_NORMAL, "download", bool(oaLastRaw))) cmdExportRecords(true, "json");
+      ui.tip("Raw OpenAlex works, with the terms that matched each work");
+      ui.popId();
     }
-    Rect f2 = field(ui, L, "Search in", 30, 0.3f);
-    ui.combo(f2, "oafield", {"Title, abstract & full text", "Title & abstract", "Title only"}, oaField);
   }
-  {
-    auto c3 = cols(L.row(30 * s), 3, 6 * s);
-    ui.textInput(c3[0], "oafrom", oaFrom, "From year");
-    ui.textInput(c3[1], "oato", oaTo, "To year");
-    if (oaKind == 1 && oaSemStrategy == 0) ui.text(c3[2], "50 per query", 12 * s, ui.c.textDim, AL_CENTER);
-    else {
-      string ml = oaKind == 0 && openAlexTerms(oaQuery).size() > 1 && oaMode == 0 ? "Max/term" : "Max";
-      float mw = ui.textW(ml, 12 * s) + 8 * s;
-      ui.text({c3[2].x, c3[2].y, mw, c3[2].h}, ml, 12 * s, ui.c.textDim);
-      ui.textInput({c3[2].x + mw, c3[2].y, c3[2].w - mw, c3[2].h}, "oamax", oaMax, "500");
-    }
-  }
-  if (hasCorpus()) ui.toggle(L.row(26 * s), "Append to the current records", oaAppend);
-  if (ui.button(L.row(34 * s), busy() && jobLabel.find("OpenAlex") != string::npos ? "Fetching\xE2\x80\xA6" : "Fetch Works", BTN_PRIMARY, "", !busy())) cmdOpenAlex();
-  if (!oaLastRecs.empty()) {
-    Rect hr = L.row(18 * s);
-    ui.text(hr, "Export the last " + plural(long(oaLastRecs.size()), "work"), 11.5f * s, ui.c.textDim);
-    auto c4 = cols(L.row(28 * s), 4, 5 * s);
-    ui.pushId("oaexp");
-    if (ui.button(c4[0], "WoS", BTN_NORMAL, "download")) cmdExportRecords(true, "wos");
-    ui.tip("Web of Science tagged text, for VOSviewer, bibliometrix and CiteSpace");
-    if (ui.button(c4[1], "RIS", BTN_NORMAL, "download")) cmdExportRecords(true, "ris");
-    ui.tip("RIS, for Zotero, EndNote and Mendeley");
-    if (ui.button(c4[2], "CSV", BTN_NORMAL, "download")) cmdExportRecords(true, "csv");
-    ui.tip("CSV with Scopus column names (Excel, R, Python)");
-    if (ui.button(c4[3], "JSON", BTN_NORMAL, "download", bool(oaLastRaw))) cmdExportRecords(true, "json");
-    ui.tip("Raw OpenAlex works, with the terms that matched each work");
-    ui.popId();
+  if (dataSection == 3 && !hasCorpus()) {
+    sectionTitle(L, "Clean and organize");
+    emptyHint(L, "data", "No records to clean", "Import bibliographic records first. Search works in OpenAlex from the Search tab.");
+    return;
   }
   if (!hasCorpus()) return;
-
-  // Cleaning: rule-based variants and AI proposals
-  sectionTitle(L, "Clean terms", "Scan finds spelling variants, plurals, hyphenation, acronyms and typos. AI also proposes synonyms, abbreviations and generic terms. Nothing changes until you merge, and every merge can be undone.");
-  {
-    const auto& cu = cleanUnits();
-    vector<string> lbl;
-    for (auto& u : cu) lbl.push_back(u.second);
-    Rect r = L.row(32 * s);
-    float bw = 64 * s;
-    Rect cb{r.x, r.y, r.w - 2 * bw - 12 * s, r.h};
-    if (ui.combo(cb, "cleanunit", lbl, cleanUnit)) { variantsScanned = false; variants.clear(); cleanNote.clear(); cleanEdit = -1; }
-    if (ui.button({cb.r() + 6 * s, r.y, bw, r.h}, "Scan", BTN_NORMAL, "", !busy())) cleanScan();
-    ui.tip("Find spelling, plural, hyphen and acronym variants by rules");
-    bool aiBusy = aiLive && aiLiveTask == ai::Task::Clean;
-    if (ui.button({r.r() - bw, r.y, bw, r.h}, aiBusy ? "\xE2\x80\xA6" : "AI", BTN_NORMAL, "", !aiLive && !agent.active)) aiCleanTerms(cleanUnit);
-    ui.tip("Ask the AI for synonyms, abbreviations and generic terms (uses the provider in Settings)");
-    if (variantsScanned) {
-      if (variants.empty()) ui.text(L.row(22 * s), cleanNote.empty() ? string("No variants found.") : cleanNote, 12 * s, ui.c.ok);
-      else {
-        int nsel = 0, nai = 0;
-        for (auto& v : variants) { if (v.apply) nsel++; if (v.ai) nai++; }
-        Rect hr = L.row(22 * s);
-        ui.text(hr, plural(long(variants.size()), "group") + (nai ? " \xC2\xB7 " + std::to_string(nai) + " from AI" : string()) + " \xC2\xB7 " + std::to_string(nsel) + " selected", 12 * s, ui.c.textDim);
-        for (size_t i = 0; i < std::min<size_t>(60, variants.size()); i++) {
-          auto& v = variants[i];
-          string sub = v.ignore ? "Ignore" + (v.note.empty() ? string() : " \xC2\xB7 " + v.note) : "\xE2\x86\x90 " + join(v.members, ", ");
-          float th = ui.textWrap({0, 0, L.w - 44 * s, 1000}, sub, 11.5f * s, ui.c.textDim, 400, false);
-          Rect rr = L.row(30 * s + th);
-          ui.pushId("var" + std::to_string(i));
-          ui.fill(rr, ui.c.card, 6 * s);
-          ui.checkbox({rr.x + 6 * s, rr.y + 5 * s, 22 * s, 22 * s}, "", v.apply);
-          string tagText = v.ai ? "AI \xC2\xB7 " + v.reason : v.reason;
-          float tw = ui.textW(tagText, 10.5f * s, 600) + 16 * s;
-          Rect tag{rr.r() - tw - 8 * s, rr.y + 7 * s, tw, 18 * s};
-          Color tc = v.ai ? ui.c.accent : (v.safe ? ui.c.ok : ui.c.warn);
-          ui.fill(tag, tc.withA(0.15f), 9 * s);
-          ui.text(tag, tagText, 10.5f * s, tc, AL_CENTER, 600);
-          float titleW = tag.x - (rr.x + 32 * s) - (v.ignore ? 6 * s : 30 * s);
-          if (cleanEdit == int(i)) {
-            Rect ti{rr.x + 30 * s, rr.y + 3 * s, titleW + 24 * s, 24 * s};
-            bool enter = false;
-            ui.textInput(ti, "cedit", cleanEditText, "Preferred label", &enter);
-            if (enter || ui.in.key(VK_RETURN)) {
-              string nl = bibClean(cleanEditText);
-              if (!nl.empty() && nl != v.target) {
-                bool inMembers = false;
-                for (auto& m : v.members) if (lower(m) == lower(v.target)) inMembers = true;
-                if (!inMembers && v.targetCount > 0) { v.members.insert(v.members.begin(), v.target); v.counts.insert(v.counts.begin(), v.targetCount); }
-                v.target = nl;
-                v.targetCount = 0;
-                for (size_t k = 0; k < v.members.size(); k++) if (lower(v.members[k]) == lower(nl)) { v.targetCount = k < v.counts.size() ? v.counts[k] : 0; v.members.erase(v.members.begin() + long(k)); if (k < v.counts.size()) v.counts.erase(v.counts.begin() + long(k)); break; }
-              }
-              cleanEdit = -1;
-            } else if (ui.in.key(VK_ESCAPE)) cleanEdit = -1;
-          } else {
-            string title = v.target + (v.ignore ? (v.targetCount > 0 ? " (" + std::to_string(v.targetCount) + ")" : string()) : v.targetCount > 0 ? " (" + std::to_string(v.targetCount) + ")" : string(" (new)"));
-            ui.text({rr.x + 32 * s, rr.y + 4 * s, titleW, 22 * s}, title, 12.5f * s, v.ignore ? ui.c.danger : ui.c.text, AL_LEFT, 600);
-            if (!v.ignore && ui.iconButton({tag.x - 28 * s, rr.y + 5 * s, 22 * s, 22 * s}, "text", "Edit the preferred label")) { cleanEdit = int(i); cleanEditText = v.target; ui.focus = ui.id("ti:cedit"); }
+  if (dataSection == 3) {
+    // Cleaning: rule-based variants and AI proposals
+    sectionTitle(L, "Clean terms", "Scan finds spelling variants, plurals, hyphenation, acronyms and typos. AI also proposes synonyms, abbreviations and generic terms. Nothing changes until you merge, and every merge can be undone.");
+    {
+      const auto& cu = cleanUnits();
+      vector<string> lbl;
+      for (auto& u : cu) lbl.push_back(u.second);
+      Rect r = L.row(32 * s);
+      float bw = 64 * s;
+      Rect cb{r.x, r.y, r.w - 2 * bw - 12 * s, r.h};
+      if (ui.combo(cb, "cleanunit", lbl, cleanUnit)) { variantsScanned = false; variants.clear(); cleanNote.clear(); cleanEdit = -1; }
+      if (ui.button({cb.r() + 6 * s, r.y, bw, r.h}, "Scan", BTN_NORMAL, "", !busy())) cleanScan();
+      ui.tip(cu[size_t(clampv(cleanUnit, 0, int(cu.size()) - 1))].first == Unit::Authors
+                 ? "Author disambiguation: the same person under several names, from ORCID / Scopus / OpenAlex ids, initials and shared affiliations or co-authors"
+                 : "Find spelling, plural, hyphen and acronym variants by rules (acronyms are also expanded from titles and abstracts)");
+      bool aiBusy = aiLive && aiLiveTask == ai::Task::Clean;
+      if (ui.button({r.r() - bw, r.y, bw, r.h}, aiBusy ? "\xE2\x80\xA6" : "AI", BTN_NORMAL, "", !aiLive && !agent.active)) aiCleanTerms(cleanUnit);
+      ui.tip("Ask the AI for synonyms, abbreviations and generic terms (uses the provider in Settings)");
+      if (variantsScanned) {
+        if (variants.empty()) ui.text(L.row(22 * s), cleanNote.empty() ? string("No variants found.") : cleanNote, 12 * s, ui.c.ok);
+        else {
+          int nsel = 0, nai = 0;
+          for (auto& v : variants) { if (v.apply) nsel++; if (v.ai) nai++; }
+          Rect hr = L.row(22 * s);
+          ui.text(hr, plural(long(variants.size()), "group") + (nai ? " \xC2\xB7 " + std::to_string(nai) + " from AI" : string()) + " \xC2\xB7 " + std::to_string(nsel) + " selected", 12 * s, ui.c.textDim);
+          for (size_t i = 0; i < std::min<size_t>(60, variants.size()); i++) {
+            auto& v = variants[i];
+            string sub = v.ignore ? "Ignore" + (v.note.empty() ? string() : " \xC2\xB7 " + v.note) : "\xE2\x86\x90 " + join(v.members, ", ");
+            if (!v.evidence.empty()) sub += "  \xC2\xB7  " + v.evidence;
+            else if (v.ai && !v.note.empty() && !v.ignore) sub += "  \xC2\xB7  " + v.note;
+            float th = ui.textWrap({0, 0, L.w - 44 * s, 1000}, sub, 11.5f * s, ui.c.textDim, 400, false);
+            Rect rr = L.row(30 * s + th);
+            ui.pushId("var" + std::to_string(i));
+            ui.fill(rr, ui.c.card, 6 * s);
+            ui.checkbox({rr.x + 6 * s, rr.y + 5 * s, 22 * s, 22 * s}, "", v.apply);
+            string tagText = v.ai ? "AI \xC2\xB7 " + v.reason : v.reason;
+            if (v.score > 0) tagText += " " + std::to_string(int(std::lround(v.score * 100))) + "%";
+            float tw = ui.textW(tagText, 10.5f * s, 600) + 16 * s;
+            Rect tag{rr.r() - tw - 8 * s, rr.y + 7 * s, tw, 18 * s};
+            Color tc = v.ai ? ui.c.accent : (v.safe ? ui.c.ok : ui.c.warn);
+            ui.fill(tag, tc.withA(0.15f), 9 * s);
+            // confidence bar under the tag
+            if (v.score > 0) {
+              Rect bar{tag.x + 4 * s, tag.b() + 2 * s, tag.w - 8 * s, 2.5f * s};
+              ui.fill(bar, tc.withA(0.18f), 1.f * s);
+              ui.fill({bar.x, bar.y, bar.w * float(clampv(v.score, 0.0, 1.0)), bar.h}, tc, 1.f * s);
+            }
+            ui.text(tag, tagText, 10.5f * s, tc, AL_CENTER, 600);
+            float titleW = tag.x - (rr.x + 32 * s) - (v.ignore ? 6 * s : 30 * s);
+            if (cleanEdit == int(i)) {
+              Rect ti{rr.x + 30 * s, rr.y + 3 * s, titleW + 24 * s, 24 * s};
+              bool enter = false;
+              ui.textInput(ti, "cedit", cleanEditText, "Preferred label", &enter);
+              if (enter || ui.in.key(VK_RETURN)) {
+                string nl = bibClean(cleanEditText);
+                if (!nl.empty() && nl != v.target) {
+                  bool inMembers = false;
+                  for (auto& m : v.members) if (lower(m) == lower(v.target)) inMembers = true;
+                  if (!inMembers && v.targetCount > 0) { v.members.insert(v.members.begin(), v.target); v.counts.insert(v.counts.begin(), v.targetCount); }
+                  v.target = nl;
+                  v.targetCount = 0;
+                  for (size_t k = 0; k < v.members.size(); k++) if (lower(v.members[k]) == lower(nl)) { v.targetCount = k < v.counts.size() ? v.counts[k] : 0; v.members.erase(v.members.begin() + long(k)); if (k < v.counts.size()) v.counts.erase(v.counts.begin() + long(k)); break; }
+                }
+                cleanEdit = -1;
+              } else if (ui.in.key(VK_ESCAPE)) cleanEdit = -1;
+            } else {
+              string title = v.target + (v.ignore ? (v.targetCount > 0 ? " (" + std::to_string(v.targetCount) + ")" : string()) : v.targetCount > 0 ? " (" + std::to_string(v.targetCount) + ")" : string(" (new)"));
+              ui.text({rr.x + 32 * s, rr.y + 4 * s, titleW, 22 * s}, title, 12.5f * s, v.ignore ? ui.c.danger : ui.c.text, AL_LEFT, 600);
+              if (!v.ignore && ui.iconButton({tag.x - 28 * s, rr.y + 5 * s, 22 * s, 22 * s}, "text", "Edit the preferred label")) { cleanEdit = int(i); cleanEditText = v.target; ui.focus = ui.id("ti:cedit"); }
+            }
+            ui.textWrap({rr.x + 32 * s, rr.y + 26 * s, rr.w - 44 * s, th + 4}, sub, 11.5f * s, ui.c.textDim);
+            ui.popId();
           }
-          ui.textWrap({rr.x + 32 * s, rr.y + 26 * s, rr.w - 44 * s, th + 4}, sub, 11.5f * s, ui.c.textDim);
-          ui.popId();
-        }
-        auto c2 = cols(L.row(32 * s), 2, 8 * s);
-        if (ui.button(c2[0], "Merge selected", BTN_PRIMARY, "check", nsel > 0)) cleanMergeSelected();
-        if (ui.button(c2[1], nsel ? "Select none" : "Select all", BTN_NORMAL)) { bool to = nsel == 0; for (auto& v : variants) v.apply = to; }
-        if (!cleanNote.empty()) {
-          float th = ui.textWrap({0, 0, L.w, 400 * s}, cleanNote, 11.5f * s, ui.c.textDim, 400, false);
-          ui.textWrap(L.row(th + 4 * s), cleanNote, 11.5f * s, ui.c.textDim);
+          auto c2 = cols(L.row(32 * s), 2, 8 * s);
+          if (ui.button(c2[0], "Merge selected", BTN_PRIMARY, "check", nsel > 0)) cleanMergeSelected();
+          if (ui.button(c2[1], nsel ? "Select none" : "Select all", BTN_NORMAL)) { bool to = nsel == 0; for (auto& v : variants) v.apply = to; }
+          if (!cleanNote.empty()) {
+            float th = ui.textWrap({0, 0, L.w, 400 * s}, cleanNote, 11.5f * s, ui.c.textDim, 400, false);
+            ui.textWrap(L.row(th + 4 * s), cleanNote, 11.5f * s, ui.c.textDim);
+          }
         }
       }
-    }
-    if (!thUndo.empty()) {
-      if (ui.button(L.row(30 * s), "Undo: " + thUndo.back().what, BTN_NORMAL, "undo")) cleanUndo();
-    }
-  }
-  // Thesaurus
-  sectionTitle(L, "Thesaurus (" + std::to_string(P->engine.thesaurus.replace.size()) + ")", "Replace or ignore terms everywhere. Leave \xE2\x80\x9Creplace with\xE2\x80\x9D empty to ignore a term.");
-  {
-    auto c2 = cols(L.row(30 * s), 2, 6 * s);
-    ui.textInput(c2[0], "thfrom", thesFrom, "Term");
-    ui.textInput(c2[1], "thto", thesTo, "Replace with (or empty)");
-    auto c3 = cols(L.row(30 * s), 3, 6 * s);
-    if (ui.button(c3[0], "Add", BTN_NORMAL, "plus", !trim(thesFrom).empty())) {
-      P->engine.thesaurus.replace[bibKey(thesFrom)] = bibClean(thesTo);
-      P->corpusChanged(); P->dirty = true; sensSig.clear();
-      thesFrom.clear(); thesTo.clear();
-    }
-    if (ui.button(c3[1], "Import\xE2\x80\xA6", BTN_NORMAL, "folder")) {
-      auto f = openFileDialog(hwnd, "Import VOSviewer thesaurus", {{"Thesaurus", "*.txt"}, {"All files", "*.*"}}, false);
-      if (!f.empty()) {
-        string err;
-        Thesaurus t;
-        if (t.load(readFileU(f[0]), &err)) { for (auto& kv : t.replace) P->engine.thesaurus.replace[kv.first] = kv.second; P->corpusChanged(); sensSig.clear(); ui.toast("Thesaurus imported", fmtInt(long(t.replace.size())) + " entries", 1); }
-        else ui.toast("Import failed", err, 3);
+      if (!thUndo.empty()) {
+        if (ui.button(L.row(30 * s), "Undo: " + thUndo.back().what, BTN_NORMAL, "undo")) cleanUndo();
       }
     }
-    if (ui.button(c3[2], "Export\xE2\x80\xA6", BTN_NORMAL, "download", !P->engine.thesaurus.empty())) {
-      string p = saveFileDialog(hwnd, "Export thesaurus", {{"VOSviewer thesaurus", "*.txt"}}, "thesaurus.txt", "txt");
-      if (!p.empty() && writeFileU(p, P->engine.thesaurus.save())) ui.toast("Thesaurus exported", fileName(p), 1);
-    }
-    if (!P->engine.thesaurus.empty()) {
-      ui.textInput(L.row(28 * s), "thfilter", thesFilter, "Filter entries", nullptr, "filter");
-      string del;
-      int shown = 0;
-      for (auto& kv : P->engine.thesaurus.replace) {
-        if (!thesFilter.empty() && !icontains(kv.first, thesFilter) && !icontains(kv.second, thesFilter)) continue;
-        if (++shown > 60) break;
-        Rect r = L.row(24 * s);
-        ui.text({r.x, r.y, r.w * 0.45f, r.h}, kv.first, 12 * s, ui.c.text);
-        ui.text({r.x + r.w * 0.45f, r.y, r.w * 0.45f, r.h}, kv.second.empty() ? "(ignored)" : "\xE2\x86\x92 " + kv.second, 12 * s, kv.second.empty() ? ui.c.danger : ui.c.textDim);
-        if (ui.iconButton({r.r() - 22 * s, r.y + 1 * s, 22 * s, 22 * s}, "x", "Remove")) del = kv.first;
+    // Thesaurus
+    sectionTitle(L, "Thesaurus (" + std::to_string(P->engine.thesaurus.replace.size()) + ")", "Replace or ignore terms everywhere. Leave \xE2\x80\x9Creplace with\xE2\x80\x9D empty to ignore a term.");
+    {
+      auto c2 = cols(L.row(30 * s), 2, 6 * s);
+      ui.textInput(c2[0], "thfrom", thesFrom, "Term");
+      ui.textInput(c2[1], "thto", thesTo, "Replace with (or empty)");
+      auto c3 = cols(L.row(30 * s), 3, 6 * s);
+      if (ui.button(c3[0], "Add", BTN_NORMAL, "plus", !trim(thesFrom).empty())) {
+        P->engine.thesaurus.replace[bibKey(thesFrom)] = bibClean(thesTo);
+        P->corpusChanged(); P->dirty = true; sensSig.clear();
+        thesFrom.clear(); thesTo.clear();
       }
-      if (!del.empty()) { P->engine.thesaurus.replace.erase(del); P->corpusChanged(); sensSig.clear(); }
-      if (ui.button(L.row(30 * s), "Clear thesaurus", BTN_DANGER, "trash")) { P->engine.thesaurus.replace.clear(); P->corpusChanged(); sensSig.clear(); }
+      if (ui.button(c3[1], "Import\xE2\x80\xA6", BTN_NORMAL, "folder")) {
+        auto f = openFileDialog(hwnd, "Import VOSviewer thesaurus", {{"Thesaurus", "*.txt"}, {"All files", "*.*"}}, false);
+        if (!f.empty()) {
+          string err;
+          Thesaurus t;
+          if (t.load(readFileU(f[0]), &err)) { for (auto& kv : t.replace) P->engine.thesaurus.replace[kv.first] = kv.second; P->corpusChanged(); sensSig.clear(); ui.toast("Thesaurus imported", fmtInt(long(t.replace.size())) + " entries", 1); }
+          else ui.toast("Import failed", err, 3);
+        }
+      }
+      if (ui.button(c3[2], "Export\xE2\x80\xA6", BTN_NORMAL, "download", !P->engine.thesaurus.empty())) {
+        string p = saveFileDialog(hwnd, "Export thesaurus", {{"VOSviewer thesaurus", "*.txt"}}, "thesaurus.txt", "txt");
+        if (!p.empty() && writeFileU(p, P->engine.thesaurus.save())) ui.toast("Thesaurus exported", fileName(p), 1);
+      }
+      if (!P->engine.thesaurus.empty()) {
+        ui.textInput(L.row(28 * s), "thfilter", thesFilter, "Filter entries", nullptr, "filter");
+        string del;
+        int shown = 0;
+        for (auto& kv : P->engine.thesaurus.replace) {
+          if (!thesFilter.empty() && !icontains(kv.first, thesFilter) && !icontains(kv.second, thesFilter)) continue;
+          if (++shown > 60) break;
+          Rect r = L.row(24 * s);
+          ui.text({r.x, r.y, r.w * 0.45f, r.h}, kv.first, 12 * s, ui.c.text);
+          ui.text({r.x + r.w * 0.45f, r.y, r.w * 0.45f, r.h}, kv.second.empty() ? "(ignored)" : "\xE2\x86\x92 " + kv.second, 12 * s, kv.second.empty() ? ui.c.danger : ui.c.textDim);
+          if (ui.iconButton({r.r() - 22 * s, r.y + 1 * s, 22 * s, 22 * s}, "x", "Remove")) del = kv.first;
+        }
+        if (!del.empty()) { P->engine.thesaurus.replace.erase(del); P->corpusChanged(); sensSig.clear(); }
+        if (ui.button(L.row(30 * s), "Clear thesaurus", BTN_DANGER, "trash")) { P->engine.thesaurus.replace.clear(); P->corpusChanged(); sensSig.clear(); }
+      }
     }
   }
 }
@@ -807,8 +904,10 @@ void App::pageBuild(Lay& L) {
       Rect cr = L.row(84 * s);
       ui.fill(cr, ui.c.card, 8 * s);
       ChartTheme t = chartTheme(false);
-      Scene sc = d.make(cr.w / s - 12, cr.h / s - 8, t);
+      sensitivityHoverScene_ = d.make(cr.w / s - 12, cr.h / s - 8, t);
+      Scene& sc = sensitivityHoverScene_;
       drawScene(g.dc.get(), g.d2f.get(), g.dw.get(), g, sc, cr.x + 6 * s, cr.y + 4 * s, s);
+      addChartHoverRegion(sc, cr, cr.x + 6 * s, cr.y + 4 * s, s, ui.id("chart-hover:sensitivity"));
       if (ui.mouseIn(cr)) {
         chartHover(sc, cr.x + 6 * s, cr.y + 4 * s, s);
         int tag = hitTag(sc, (ui.in.mx - cr.x - 6 * s) / s, (ui.in.my - cr.y - 4 * s) / s);
@@ -1142,7 +1241,7 @@ void App::pageAnalyse(Lay& L) {
     d.onClick = [this](int c) { focusCluster(c); };
     chartBox(L, "strat", d, 230);
     auto c2 = cols(L.row(30 * s), 2, 8 * s);
-    if (ui.button(c2[0], "Auto-name all", BTN_NORMAL, "sparkle")) { pushUndo("Names"); applyAutoNames(N, hasCorpus() ? &P->corpus : nullptr); cinfoValid = false; P->dirty = true; }
+    if (ui.button(c2[0], "Auto-name all", BTN_NORMAL, "sparkle")) { pushUndo("Names"); applyAutoNames(N, hasCorpus() ? &P->corpus : nullptr); cinfoValid = false; P->dirty = true; styleDirty = true; figSig.clear(); }
     if (ui.button(c2[1], "Re-cluster", BTN_NORMAL, "shuffle", !busy())) cmdRecluster();
     {
       float res = float(P->params.cluster.resolution);
@@ -1165,7 +1264,7 @@ void App::pageAnalyse(Lay& L) {
       string nm = N.clusterNames[size_t(c)].empty() ? ci.autoName : N.clusterNames[size_t(c)];
       string before = nm;
       ui.textInput({card.x + 38 * s, card.y + 8 * s, card.w - 84 * s, 28 * s}, "name", nm, "Cluster name");
-      if (nm != before) { N.clusterNames[size_t(c)] = nm; P->dirty = true; }
+      if (nm != before) { N.clusterNames[size_t(c)] = nm; P->dirty = true; styleDirty = true; figSig.clear(); }
       if (ui.iconButton({card.r() - 38 * s, card.y + 9 * s, 28 * s, 26 * s}, "target", "Focus on the canvas")) focusCluster(c);
       string meta = plural(ci.size, "item") + " \xC2\xB7 " + ci.quadrant;
       if (std::isfinite(ci.avgYear)) meta += " \xC2\xB7 avg. year " + fmtNum(ci.avgYear, 1);
@@ -1300,6 +1399,7 @@ void App::pageTrends(Lay& L) {
   if (!hasCorpus()) { emptyHint(L, "trends", "No Records", "Import data to see trends."); return; }
   tabRow(L, {"Growth", "Topics", "Bursts", "Themes", "Compare", "Main path", "3-field", "RPYS"}, {0, 5, 1, 2, 3, 7, 4, 6}, trTab);
   L.space(4 * s);
+  drawScopeBanner(L);
   if (trTab == 5) { trendsTopics(L); return; }
   if (trTab == 6) { trendsRpys(L); return; }
   if (trTab == 7) { trendsMainPath(L); return; }
@@ -1325,7 +1425,7 @@ void App::pageTrends(Lay& L) {
     if (ui.numberInput(f2, "bmin", burstMin, 2, 1000)) burstsValid = false;
     if (ui.slider(L.row(28 * s), "Rate ratio s", burstS, 1.1f, 5, "%.1f", 0.1f)) burstsValid = false;
     if (ui.slider(L.row(28 * s), "\xCE\xB3 (transition cost)", burstG, 0, 2, "%.2f", 0.05f)) burstsValid = false;
-    if (!burstsValid) { bursts = detectBursts(P->corpus, corpusUnits()[size_t(trUnit)].first, burstMin, burstS, burstG); burstsValid = true; }
+    if (!burstsValid) { bursts = detectBursts(scopeCorpus(), corpusUnits()[size_t(trUnit)].first, burstMin, burstS, burstG); burstsValid = true; }
     ChartDef d;
     d.title = "Top bursts \xC2\xB7 " + ul[size_t(trUnit)];
     auto b = bursts;
@@ -1345,7 +1445,7 @@ void App::pageTrends(Lay& L) {
     if (!evoValid) {
       vector<int> cuts;
       for (auto& t : splitAny(evoCuts, ", ;")) if (isDigits(t)) cuts.push_back(toInt(t));
-      evo = thematicEvolution(P->corpus, corpusUnits()[size_t(trUnit)].first, cuts, 2, &P->engine.thesaurus);
+      evo = thematicEvolution(scopeCorpus(), corpusUnits()[size_t(trUnit)].first, cuts, 2, &P->engine.thesaurus);
       evoValid = true;
     }
     ChartDef d;
@@ -1363,26 +1463,77 @@ void App::pageTrends(Lay& L) {
       }
     }
   } else if (trTab == 3) {
-    sectionTitle(L, "Compare two periods", "Which terms grew or declined in relative frequency (log ratio of shares).");
+    sectionTitle(L, "Compare", "Two periods, two source files or two thresholds of the same map \xE2\x80\x94 side by side (same layout; circle size is the item's share of documents on each side) or as a difference map.");
     if (!cmpA0) { int mid = (gr.y0 + gr.y1) / 2; cmpA0 = gr.y0; cmpA1 = mid; cmpB0 = mid + 1; cmpB1 = gr.y1; }
-    Rect f = field(ui, L, "Unit", 32);
-    if (ui.combo(f, "cu", ul, trUnit)) cmpValid = false;
-    Rect fa = field(ui, L, "Period A", 30, 0.3f);
-    auto ca = cols(fa, 2, 6 * s);
-    if (ui.numberInput(ca[0], "a0", cmpA0, 1900, 2100)) cmpValid = false;
-    if (ui.numberInput(ca[1], "a1", cmpA1, 1900, 2100)) cmpValid = false;
-    Rect fb = field(ui, L, "Period B", 30, 0.3f);
-    auto cb = cols(fb, 2, 6 * s);
-    if (ui.numberInput(cb[0], "b0", cmpB0, 1900, 2100)) cmpValid = false;
-    if (ui.numberInput(cb[1], "b1", cmpB1, 1900, 2100)) cmpValid = false;
-    if (!cmpValid) { cmp = comparePeriods(P->corpus, corpusUnits()[size_t(trUnit)].first, cmpA0, cmpA1, cmpB0, cmpB1); cmpValid = true; }
-    ChartDef d;
-    d.title = "Emerging vs declining \xC2\xB7 " + ul[size_t(trUnit)];
-    Comparison c = cmp;
-    d.make = [c](double w, double h, const ChartTheme& t) { return chartCompare(c, 10, w, h, t); };
-    chartBox(L, "cmp", d, 380);
-    ui.text(L.row(18 * s), "A: " + fmtInt(cmp.nA) + " docs \xC2\xB7 B: " + fmtInt(cmp.nB) + " docs \xC2\xB7 " + std::to_string(cmp.stable.size()) + " stable terms", 11.5f * s, ui.c.textDim);
-    trendsDifference(L);
+    cmpSideOpen = cmpSideOpen && mainChartOpen && startsWith(mainChart.title, "Compare \xC2\xB7 ");
+    auto changed = [&]() { cmpValid = false; pdiffValid = false; if (cmpSideOpen) compareShowSideBySide(); };
+    {
+      int kind = cmpKind;
+      if (ui.segmented(L.row(28 * s), {"Periods", "Sources", "Thresholds"}, kind, "cmpkind") && kind != cmpKind) { cmpKind = kind; changed(); }
+    }
+    L.space(2 * s);
+    if (cmpKind == 0) {
+      Rect f = field(ui, L, "Unit", 32);
+      if (ui.combo(f, "cu", ul, trUnit)) cmpValid = false;
+      Rect fa = field(ui, L, "Period A", 30, 0.3f);
+      auto ca = cols(fa, 2, 6 * s);
+      if (ui.numberInput(ca[0], "a0", cmpA0, 1900, 2100)) changed();
+      if (ui.numberInput(ca[1], "a1", cmpA1, 1900, 2100)) changed();
+      Rect fb = field(ui, L, "Period B", 30, 0.3f);
+      auto cb = cols(fb, 2, 6 * s);
+      if (ui.numberInput(cb[0], "b0", cmpB0, 1900, 2100)) changed();
+      if (ui.numberInput(cb[1], "b1", cmpB1, 1900, 2100)) changed();
+      if (!cmpValid) { cmp = comparePeriods(scopeCorpus(), corpusUnits()[size_t(trUnit)].first, cmpA0, cmpA1, cmpB0, cmpB1); cmpValid = true; }
+      ChartDef d;
+      d.title = "Emerging vs declining \xC2\xB7 " + ul[size_t(trUnit)];
+      Comparison c = cmp;
+      d.make = [c](double w, double h, const ChartTheme& t) { return chartCompare(c, 10, w, h, t); };
+      chartBox(L, "cmp", d, 380);
+      ui.text(L.row(18 * s), "A: " + fmtInt(cmp.nA) + " docs \xC2\xB7 B: " + fmtInt(cmp.nB) + " docs \xC2\xB7 " + std::to_string(cmp.stable.size()) + " stable terms", 11.5f * s, ui.c.textDim);
+    } else if (cmpKind == 1) {
+      const Corpus& C = P->corpus;
+      if (C.files.size() < 2) {
+        float h = ui.textWrap({L.x, L.y, L.w, 200 * s}, "Import a second file (Data page) to compare two sources: the map is built from all records, each side shows the items as they appear in one file.", 12 * s, ui.c.textDim);
+        L.y += h + 8 * s;
+      } else {
+        vector<string> names;
+        for (auto& f : C.files) names.push_back(truncate(fileName(f.name), 40) + " (" + fmtInt(f.records) + ")");
+        cmpFileA = clampv(cmpFileA, 0, int(names.size()) - 1);
+        cmpFileB = clampv(cmpFileB, 0, int(names.size()) - 1);
+        Rect fa = field(ui, L, "Source A", 32, 0.3f);
+        if (ui.combo(fa, "cfa", names, cmpFileA)) changed();
+        Rect fb = field(ui, L, "Source B", 32, 0.3f);
+        if (ui.combo(fb, "cfb", names, cmpFileB)) changed();
+        if (!C.provenanceKnown()) ui.text(L.row(18 * s), "Older project: which file a record came from is unknown. Import the files again.", 11.5f * s, ui.c.warn);
+      }
+    } else {
+      if (!hasMap()) ui.text(L.row(18 * s), "Build a map first.", 12 * s, ui.c.textDim);
+      else {
+        const Network& N = P->net;
+        double lo = 1e18, hi = 0;
+        for (int i = 0; i < N.n(); i++) { lo = std::min(lo, N.weight(i)); hi = std::max(hi, N.weight(i)); }
+        if (cmpThA <= 0) cmpThA = lo;
+        if (cmpThB <= 0) cmpThB = std::min(hi, std::max(lo * 2, lo + 1));
+        string wn = N.weightIdx >= 0 && N.weightIdx < int(N.weightNames.size()) ? N.weightNames[size_t(N.weightIdx)] : string("Weight");
+        Rect fa = field(ui, L, "Min. " + lower(wn) + " A", 30, 0.55f);
+        if (ui.numberInputD(fa, "cta", cmpThA, lo, hi, 1, 0)) changed();
+        Rect fb = field(ui, L, "Min. " + lower(wn) + " B", 30, 0.55f);
+        if (ui.numberInputD(fb, "ctb", cmpThB, lo, hi, 1, 0)) changed();
+        ui.text(L.row(18 * s), "Items below a threshold are faded on that side; positions and clusters stay the same.", 11.5f * s, ui.c.textDim);
+      }
+    }
+    L.space(4 * s);
+    {
+      auto b2 = cols(L.row(32 * s), 2, 6 * s);
+      if (ui.button(b2[0], cmpSideOpen ? "Update Side by Side" : "Side by Side", BTN_PRIMARY, "layers", hasMap() && !busy())) {
+        string err;
+        if (!compareShowSideBySide(&err)) ui.toast("Compare", err, 2, 4);
+      }
+      ui.tip("Shows both sides of the comparison in the main area, on the map's own layout. Export it like any chart (right-click / Export).");
+      if (ui.button(b2[1], "Close", BTN_NORMAL, "", cmpSideOpen)) compareClose();
+    }
+    if (cmpKind == 2) ui.text(L.row(18 * s), "Thresholds have no difference map: use Side by Side.", 11.5f * s, ui.c.textDim);
+    else trendsDifference(L);
   } else {
     sectionTitle(L, "Three-field plot", "How the top items of three fields connect through shared documents.");
     Rect f1 = field(ui, L, "Left", 32);
@@ -1393,7 +1544,7 @@ void App::pageTrends(Lay& L) {
     if (ui.combo(f3, "tr", ul, tfR)) tfValid = false;
     Rect f4 = field(ui, L, "Items per field", 30, 0.58f);
     if (ui.numberInput(f4, "tn", tfTop, 3, 30)) tfValid = false;
-    if (!tfValid) { tf = threeField(P->corpus, corpusUnits()[size_t(tfL)].first, corpusUnits()[size_t(tfM)].first, corpusUnits()[size_t(tfR)].first, tfTop); tfValid = true; }
+    if (!tfValid) { tf = threeField(scopeCorpus(), corpusUnits()[size_t(tfL)].first, corpusUnits()[size_t(tfM)].first, corpusUnits()[size_t(tfR)].first, tfTop); tfValid = true; }
     ChartDef d;
     d.title = ul[size_t(tfL)] + " \xE2\x86\x92 " + ul[size_t(tfM)] + " \xE2\x86\x92 " + ul[size_t(tfR)];
     ThreeField t3 = tf;
@@ -1412,6 +1563,7 @@ void App::pageActors(Lay& L) {
   const char* tn[5] = {"Authors", "Sources", "Countries", "Orgs", "Laws"};
   tabRow(L, {"Authors", "Sources", "Countries", "Orgs", "Documents", "Laws"}, {0, 1, 2, 3, 5, 4}, acTab);
   L.space(4 * s);
+  drawScopeBanner(L);
   if (acTab == 5) { actorsDocs(L); return; }
   if (acTab == 4) {
     const Bradford& b = statBradford();
@@ -1437,7 +1589,7 @@ void App::pageActors(Lay& L) {
     return;
   }
   static const Unit units[4] = {Unit::Authors, Unit::Sources, Unit::Countries, Unit::Orgs};
-  if (actorsUnit != acTab) { actors = topActors(P->corpus, units[acTab], 200); actorsUnit = acTab; }
+  if (actorsUnit != acTab) { actors = topActors(scopeCorpus(), units[acTab], 200); actorsUnit = acTab; }
   {
     vector<std::pair<string, double>> rows;
     for (size_t k = 0; k < std::min<size_t>(10, actors.size()); k++) rows.push_back({actors[k].label, double(actors[k].docs)});
@@ -1449,7 +1601,7 @@ void App::pageActors(Lay& L) {
   }
   actorsTimeline(L, units[acTab]);
   if (acTab == 2) {  // countries: single- vs multiple-country publications
-    if (!collabValid) { collab = countryCollaboration(P->corpus, 12); collabValid = true; }
+    if (!collabValid) { collab = countryCollaboration(scopeCorpus(), 12); collabValid = true; }
     if (!collab.empty()) {
       sectionTitle(L, "International collaboration", "SCP: documents whose authors are all from one country. MCP: documents with co-authors from several countries. The label shows the MCP share. Documents are credited to every country in their affiliations.");
       ChartDef d;
@@ -1602,6 +1754,7 @@ void App::pagePublish(Lay& L) {
   {
     ch |= ui.toggle(L.row(26 * s), "Transparent background", F.transparent);
     ch |= ui.toggle(L.row(26 * s), "PDF: one page per plot", F.pdfPages);
+    ch |= ui.toggle(L.row(26 * s), "Hybrid SVG/PDF (native text)", F.hybridExport);
     auto c3 = cols(L.row(40 * s), 3, 6 * s);
     if (ui.button(c3[0], "SVG", BTN_PRIMARY, "download")) cmdExportFigure("svg");
     if (ui.button(c3[1], "PDF", BTN_PRIMARY, "download")) cmdExportFigure("pdf");
@@ -1690,7 +1843,7 @@ void App::pagePublish(Lay& L) {
     ui.tip("All loaded records as CSV (Scopus column names)");
     ui.popId();
   }
-  if (ch) figSig.clear();
+  if (ch) { figSig.clear(); P->dirty = true; }
 }
 
 // =====================================================================================
@@ -1728,7 +1881,7 @@ void App::trendsTopics(Lay& L) {
   Rect f3 = field(ui, L, "Terms per year", 30, 0.58f);
   if (ui.numberInput(f3, "ttper", ttPerYear, 1, 10, 1)) ttValid = false;
   if (!ttValid) {
-    ttopics = trendTopics(P->corpus, corpusUnits()[size_t(clampv(trUnit, 0, int(corpusUnits().size()) - 1))].first, ttMin, ttPerYear, &P->engine.thesaurus);
+    ttopics = trendTopics(scopeCorpus(), corpusUnits()[size_t(clampv(trUnit, 0, int(corpusUnits().size()) - 1))].first, ttMin, ttPerYear, &P->engine.thesaurus);
     ttValid = true;
   }
   if (ttopics.empty()) {
@@ -1760,7 +1913,7 @@ void App::trendsRpys(Lay& L) {
   if (ui.numberInput({c2[0].x + 44 * s, c2[0].y, c2[0].w - 44 * s, c2[0].h}, "rpf", rpFrom, 0, 2100, 1)) rpValid = false;
   ui.text({c2[1].x, c2[1].y, 30 * s, c2[1].h}, "To", 12 * s, ui.c.textDim);
   if (ui.numberInput({c2[1].x + 30 * s, c2[1].y, c2[1].w - 30 * s, c2[1].h}, "rpt", rpTo, 0, 2100, 1)) rpValid = false;
-  if (!rpValid) { rpy = rpys(P->corpus, rpFrom, rpTo); rpValid = true; }
+  if (!rpValid) { rpy = rpys(scopeCorpus(), rpFrom, rpTo); rpValid = true; }
   ChartDef d;
   d.title = "References by year";
   d.make = [this](double w, double h, const ChartTheme& t) { return chartRpys(rpy, w, h, t); };
@@ -1781,7 +1934,7 @@ void App::trendsRpys(Lay& L) {
 }
 
 void App::actorsTimeline(Lay& L, Unit u) {
-  if (prodUnit != int(u)) { prod = productionOverTime(P->corpus, u, 10); prodUnit = int(u); }
+  if (prodUnit != int(u)) { prod = productionOverTime(scopeCorpus(), u, 10); prodUnit = int(u); }
   if (prod.labels.empty() || prod.y1 <= prod.y0) return;
   sectionTitle(L, "Production over time", "Top 10 by documents. Circle size = documents in that year; colour intensity = citations per year received by those documents (as in Bibliometrix).");
   ChartDef d;
@@ -1821,13 +1974,17 @@ void App::actorsDocs(Lay& L) {
   int nowY = st.wYear;
   static vector<DocBar> rowsCache;
   static uint64_t rowsKey = 0;
-  uint64_t rk = P->corpusVersion * 31 + uint64_t(docRank) * 7 + uint64_t(X.links) * 131 + uint64_t(reinterpret_cast<uintptr_t>(P.get()));
+  bool scoped = scopeActive();
+  uint64_t rk = P->corpusVersion * 31 + uint64_t(docRank) * 7 + uint64_t(X.links) * 131 + uint64_t(reinterpret_cast<uintptr_t>(P.get())) + scopeVer_ * 977;
   if (rk != rowsKey || rowsCache.empty()) {
     rowsKey = rk;
     rowsCache.clear();
     vector<DocBar>& rows = rowsCache;
     vector<std::pair<double, int>> v;
+    vector<char> inScope;
+    if (scoped) { inScope.assign(C.recs.size(), 0); for (int r : scopeRecs_) if (r >= 0 && size_t(r) < inScope.size()) inScope[size_t(r)] = 1; }
     for (size_t i = 0; i < C.recs.size(); i++) {
+      if (scoped && !inScope[i]) continue;
       const Record& r = C.recs[i];
       double val = docRank == 0 ? r.cites : docRank == 1 ? (r.year ? double(r.cites) / std::max(1, nowY - r.year + 1) : 0.0) : double(i < X.citedBy.size() ? X.citedBy[i].size() : 0);
       if (val > 0) v.push_back({val, int(i)});

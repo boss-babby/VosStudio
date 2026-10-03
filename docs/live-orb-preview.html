@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VOSStudio Live AI — orb design preview</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #1b1c20; color: #d7d9de; font: 13px/1.4 "Segoe UI", system-ui, sans-serif; }
+  #wrap { display: grid; grid-template-columns: 1fr 300px; height: 100%; }
+  canvas { width: 100%; height: 100%; display: block; background: #202126; cursor: default; }
+  aside { padding: 18px 18px 18px 16px; border-left: 1px solid #2f3138; background: #1b1c20; overflow: auto; }
+  h1 { font-size: 15px; margin: 0 0 4px; font-weight: 600; }
+  p { margin: 6px 0 10px; color: #a8abb3; }
+  .row { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 12px; }
+  button { background: #2a2c33; color: #d7d9de; border: 1px solid #3a3d46; border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+  button.on { background: #3b62d6; border-color: #3b62d6; color: #fff; }
+  label { display: block; margin: 8px 0 2px; color: #a8abb3; }
+  input[type=range] { width: 100%; }
+  small { color: #7d818a; }
+  .light canvas { background: #f2f3f5; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c"></canvas>
+  <aside>
+    <h1>Live AI orb — design preview</h1>
+    <p>The same drawing as <code>App::drawLiveOrb</code> in <code>src/win/live.cpp</code> (Direct2D), reproduced on a canvas so the motion can be judged without Windows. Move the mouse near the orb, click it, double-click it.</p>
+    <label>State</label>
+    <div class="row" id="states">
+      <button data-s="off">Off</button>
+      <button data-s="idle" class="on">Connected</button>
+      <button data-s="listening">Listening</button>
+      <button data-s="thinking">Thinking</button>
+      <button data-s="tool">Working (tool)</button>
+      <button data-s="speaking">Speaking</button>
+      <button data-s="error">Error</button>
+    </div>
+    <label>Simulated sound level <small>(listening / speaking)</small></label>
+    <input type="range" id="lvl" min="0" max="100" value="55">
+    <label>Speech pattern</label>
+    <div class="row">
+      <button id="pat" class="on">Syllables (auto)</button>
+      <button id="patc">Constant</button>
+    </div>
+    <label>Transition</label>
+    <div class="row">
+      <button id="morph">Panel ⇄ orb</button>
+      <button id="theme">Light / dark</button>
+    </div>
+    <p><small>Colours: connected = accent blue, listening = teal, thinking = violet with orbiting electrons, speaking = coral with the voice ring and ripples, error = red pulse, off = grey. Everything eases; nothing snaps.</small></p>
+  </aside>
+</div>
+<script>
+(() => {
+  const cv = document.getElementById('c');
+  const ctx = cv.getContext('2d');
+  let W = 0, H = 0, dpr = 1, s = 1;
+  const resize = () => { dpr = window.devicePixelRatio || 1; W = cv.clientWidth; H = cv.clientHeight; cv.width = W * dpr; cv.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0); s = 1.15; };
+  window.addEventListener('resize', resize); resize();
+
+  // ---- state
+  let state = 'idle', dark = true, lvlUser = 0.55, autoPattern = true;
+  const A = { lastT: 0, in: 0, out: 0, energy: 0, spin: 0, breathe: 0, ph: [0, 0.9, 2.1, 3.4], hover: 0, press: 0, bars: new Array(36).fill(0), col: null, lastRipple: 0, ripples: [], clickT: 0 };
+  let mini = true, morphT0 = -1, morphTo = true;
+  const mouse = { x: -1, y: -1, down: false, pressed: false, dbl: false };
+  const C = () => dark
+    ? { accent: [0.36, 0.52, 0.93], danger: [0.93, 0.33, 0.33], panel2: [0.16, 0.165, 0.19], border: [0.25, 0.26, 0.30], text: [0.88, 0.89, 0.92], textDim: [0.66, 0.68, 0.72], textFaint: [0.45, 0.47, 0.52], ok: [0.30, 0.75, 0.45], hover: [0.25, 0.26, 0.30] }
+    : { accent: [0.23, 0.42, 0.85], danger: [0.85, 0.25, 0.25], panel2: [1, 1, 1], border: [0.82, 0.83, 0.86], text: [0.12, 0.13, 0.15], textDim: [0.40, 0.42, 0.46], textFaint: [0.58, 0.60, 0.64], ok: [0.20, 0.62, 0.35], hover: [0.92, 0.93, 0.95] };
+  const rgba = (c, a = 1) => `rgba(${Math.round(c[0] * 255)},${Math.round(c[1] * 255)},${Math.round(c[2] * 255)},${a})`;
+  const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const noise1 = (seed, t) => 0.5 + 0.5 * (Math.sin(t * 1.7 + seed * 12.9898) * 0.5 + Math.sin(t * 2.9 + seed * 78.233) * 0.3 + Math.sin(t * 0.7 + seed * 37.719) * 0.2);
+  const easeOutCubic = u => { u = clamp(u, 0, 1); return 1 - (1 - u) ** 3; };
+  const easeInOutCubic = u => { u = clamp(u, 0, 1); return u < 0.5 ? 4 * u * u * u : 1 - ((-2 * u + 2) ** 3) / 2; };
+  const stateColor = (c, err, off, speaking, listening, thinking) => err ? c.danger : off ? [0.56, 0.60, 0.68] : speaking ? [0.99, 0.52, 0.34] : listening ? [0.14, 0.78, 0.60] : thinking ? [0.58, 0.44, 0.98] : c.accent;
+
+  const orbRect = () => { const d = 62 * s; return { x: W - d - 22 * s, y: H - 26 * s - 22 * s - d, w: d, h: d }; };
+  const panelRect = () => { const w = Math.min(350 * s, W - 24 * s), h = clamp(H * 0.42, 260 * s, 460 * s); return { x: W - w - 12 * s, y: H - 26 * s - 12 * s - h, w, h }; };
+  const hitRect = () => { const o = orbRect(); return { x: o.x - 22 * s, y: o.y - 46 * s, w: o.w + 44 * s, h: o.h + 64 * s }; };
+  const has = (r, x, y) => x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
+
+  const radial = (cx, cy, rx, ry, ox, oy, stops) => {
+    const g = ctx.createRadialGradient(ox, oy, 0, cx, cy, rx);
+    for (const [p, c, a] of stops) g.addColorStop(p, rgba(c, a));
+    ctx.save(); ctx.translate(cx, cy); ctx.scale(1, ry / rx); ctx.translate(-cx, -cy);
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, rx, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+  };
+  const blob = (cx, cy, base, amp, ph, freq, rot, fill) => {
+    const n = 96; ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const th = i * Math.PI * 2 / n; let r = 1;
+      for (let k = 0; k < 3; k++) r += amp[k] * Math.sin(freq[k] * th + ph[k]);
+      const a = th + rot; const x = cx + Math.cos(a) * base * r, y = cy + Math.sin(a) * base * r;
+      if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+    }
+    ctx.closePath(); ctx.fillStyle = fill; ctx.fill();
+  };
+  const bar = (cx, cy, ang, r0, len, w, col) => { ctx.strokeStyle = col; ctx.lineWidth = w; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(cx + Math.cos(ang) * r0, cy + Math.sin(ang) * r0); ctx.lineTo(cx + Math.cos(ang) * (r0 + len), cy + Math.sin(ang) * (r0 + len)); ctx.stroke(); };
+  const circle = (cx, cy, r, col, filled = true, w = 1) => { ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); if (filled) { ctx.fillStyle = col; ctx.fill(); } else { ctx.strokeStyle = col; ctx.lineWidth = w; ctx.stroke(); } };
+  const rrect = (r, rad, fill, stroke) => { ctx.beginPath(); ctx.roundRect(r.x, r.y, r.w, r.h, rad); if (fill) { ctx.fillStyle = fill; ctx.fill(); } if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1; ctx.stroke(); } };
+  const shadow = (r, rad, spread) => { for (let k = 4; k >= 1; k--) { const e = spread * k / 4; rrect({ x: r.x - e * 0.6, y: r.y - e * 0.3, w: r.w + e * 1.2, h: r.h + e * 1.2 }, rad + e, rgba([0, 0, 0], dark ? 0.045 : 0.03)); } };
+  const icon = (name, cx, cy, size, col, lw) => {
+    ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = lw; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    if (name === 'mic') { const w = size * 0.36, h = size * 0.62; ctx.beginPath(); ctx.roundRect(cx - w / 2, cy - h / 2 - size * 0.08, w, h, w / 2); ctx.stroke(); ctx.beginPath(); ctx.arc(cx, cy + size * 0.02, size * 0.34, 0.15 * Math.PI, 0.85 * Math.PI); ctx.stroke(); ctx.beginPath(); ctx.moveTo(cx, cy + size * 0.36); ctx.lineTo(cx, cy + size * 0.5); ctx.stroke(); }
+    else if (name === 'live') { for (let i = 0; i < 4; i++) { const h = size * [0.35, 0.7, 0.5, 0.3][i]; ctx.beginPath(); ctx.moveTo(cx - size * 0.3 + i * size * 0.2, cy - h / 2); ctx.lineTo(cx - size * 0.3 + i * size * 0.2, cy + h / 2); ctx.stroke(); } }
+    else if (name === 'expand') { ctx.beginPath(); ctx.moveTo(cx - size * 0.35, cy + size * 0.35); ctx.lineTo(cx + size * 0.35, cy - size * 0.35); ctx.moveTo(cx - size * 0.05, cy - size * 0.35); ctx.lineTo(cx + size * 0.35, cy - size * 0.35); ctx.lineTo(cx + size * 0.35, cy + size * 0.05); ctx.stroke(); }
+    else if (name === 'x') { ctx.beginPath(); ctx.moveTo(cx - size * 0.32, cy - size * 0.32); ctx.lineTo(cx + size * 0.32, cy + size * 0.32); ctx.moveTo(cx + size * 0.32, cy - size * 0.32); ctx.lineTo(cx - size * 0.32, cy + size * 0.32); ctx.stroke(); }
+  };
+
+  // simulated sound
+  const levels = (t) => {
+    const l = lvlUser;
+    if (!autoPattern) return { inL: state === 'listening' ? l : 0, outL: state === 'speaking' ? l : 0 };
+    const syll = Math.max(0, Math.sin(t * 9.5) * 0.6 + Math.sin(t * 3.7) * 0.4 + 0.15) * (0.5 + 0.5 * noise1(3, t * 0.8));
+    const pause = (Math.sin(t * 0.9) > 0.75) ? 0 : 1;
+    const v = l * syll * pause;
+    return { inL: state === 'listening' ? v : 0, outL: state === 'speaking' ? v : 0 };
+  };
+
+  let frameCount = 0;
+  const drawOrb = (t) => {
+    const c = C(), o = orbRect(), cx = o.x + o.w / 2, cy = o.y + o.h / 2, R0 = o.w / 2;
+    const off = state === 'off' || state === 'error', err = state === 'error', thinking = state === 'thinking' || state === 'tool', toolRunning = state === 'tool';
+    const speaking = state === 'speaking', mic = state === 'listening', listening = mic && !speaking;
+    const { inL, outL } = levels(t);
+    const dt = A.lastT ? clamp(t - A.lastT, 0, 0.05) : 0.016; A.lastT = t;
+    const ease = (k, target, attack, release) => { const kk = target > A[k] ? attack : release; A[k] += (target - A[k]) * (1 - Math.exp(-dt * kk)); };
+    ease('in', clamp(inL * 1.6, 0, 1), 22, 7); ease('out', clamp(outL * 1.25, 0, 1), 26, 8);
+    const level = Math.max(A.in, A.out); ease('energy', level, 6, 2.5);
+    const speed = 0.35 + 1.6 * A.energy + (thinking ? 0.9 : 0); A.spin += dt * speed;
+    const phSpeed = [0.9, -1.3, 0.6, -0.45]; for (let k = 0; k < 4; k++) A.ph[k] += dt * phSpeed[k] * (0.6 + 1.8 * A.energy + (thinking ? 0.8 : 0));
+    A.breathe += dt * (off ? 0.9 : 1.6);
+    const want = stateColor(c, err, off && !err, speaking, listening, thinking);
+    if (!A.col) A.col = want.slice(); const ck = 1 - Math.exp(-dt * 5); for (let i = 0; i < 3; i++) A.col[i] += (want[i] - A.col[i]) * ck;
+    const base = A.col, light = mix(base, [1, 1, 1], 0.55), deep = mix(base, [0.05, 0.04, 0.12], 0.45);
+    // interaction
+    const nearby = has(hitRect(), mouse.x, mouse.y); ease('hover', nearby ? 1 : 0, 14, 8);
+    const bw = 24 * s, bExpand = { x: cx - bw - 4 * s, y: o.y - 34 * s, w: bw, h: bw }, bClose = { x: cx + 4 * s, y: o.y - 34 * s, w: bw, h: bw };
+    const hExpand = A.hover > 0.05 && has(bExpand, mouse.x, mouse.y), hClose = A.hover > 0.05 && has(bClose, mouse.x, mouse.y);
+    const overSphere = Math.hypot(mouse.x - cx, mouse.y - cy) <= R0 * 1.15;
+    let doExpand = false, doMic = false;
+    if (mouse.pressed && hExpand) doExpand = true;
+    else if (mouse.pressed && overSphere) A.ripples.push({ t0: t, r0: R0 * 0.9, a: 0.5 });
+    if (mouse.dbl && overSphere) { doExpand = true; A.clickT = 0; }
+    else if (mouse.clicked && overSphere) A.clickT = t;
+    if (A.clickT > 0 && t - A.clickT > 0.3) { A.clickT = 0; doMic = true; }
+    ease('press', mouse.down && overSphere ? 1 : 0, 30, 10);
+    cv.style.cursor = overSphere || hExpand || hClose ? 'pointer' : 'default';
+    const scale = 1 + 0.04 * A.hover - 0.07 * A.press + 0.10 * A.energy + (off ? 0 : 0.012 * Math.sin(A.breathe));
+    const R = R0 * 0.86 * scale, alive = !off || err;
+    // 1 glow
+    { let ga = (off ? 0.10 : 0.22) + 0.30 * A.energy + (thinking ? 0.06 + 0.05 * Math.sin(t * 3.1) : 0); if (err) ga = 0.22 + 0.16 * Math.sin(t * 2.4);
+      const gr = R0 * (1.9 + 0.9 * A.energy); radial(cx, cy, gr, gr, cx, cy, [[0, base, ga], [0.45, base, ga * 0.45], [1, base, 0]]); }
+    // 2 aura
+    if (alive) { const freq = [3, 5, 2], e = A.energy;
+      for (let layer = 0; layer < 3; layer++) {
+        const amp = [0.035 + 0.16 * e + 0.02 * layer, 0.025 + 0.10 * e, 0.02 + 0.06 * e];
+        const ph = [A.ph[layer % 4] + layer * 1.9, A.ph[(layer + 1) % 4] * 1.3, A.ph[(layer + 2) % 4] * 0.7 + layer];
+        const baseR = R * (1.14 + 0.10 * layer + 0.26 * e + (thinking ? 0.05 : 0));
+        const rot = A.spin * (layer % 2 ? -0.7 : 0.5) + layer * 2.1;
+        const lc = layer === 1 ? mix(base, [0.45, 0.55, 1], 0.35) : layer === 2 ? light : base;
+        blob(cx, cy, baseR, amp, ph, freq, rot, rgba(lc, (0.16 - 0.03 * layer) * (0.7 + 0.6 * e)));
+      } }
+    // 3 ripples
+    if (speaking && A.out > A.energy + 0.10 && t - A.lastRipple > 0.26) { A.lastRipple = t; A.ripples.push({ t0: t, r0: R * 1.05, a: 0.42 }); }
+    if (listening && A.in > 0.55 && t - A.lastRipple > 0.5) { A.lastRipple = t; A.ripples.push({ t0: t, r0: R * 1.05, a: 0.25 }); }
+    A.ripples = A.ripples.filter(rp => (t - rp.t0) / 0.95 < 1);
+    for (const rp of A.ripples) { const u = (t - rp.t0) / 0.95; circle(cx, cy, rp.r0 + easeOutCubic(u) * R0 * 1.5, rgba(light, rp.a * (1 - u) * (1 - u)), false, (1.8 * (1 - u) + 0.4) * s); }
+    // 4 voice ring
+    { const nb = 36, src = speaking ? A.out : listening ? A.in : 0;
+      for (let i = 0; i < nb; i++) { const target = src > 0.02 ? src * (0.35 + 0.65 * noise1(i, t * 1.6)) : 0; const k = target > A.bars[i] ? 1 - Math.exp(-dt * 24) : 1 - Math.exp(-dt * 9); A.bars[i] += (target - A.bars[i]) * k; }
+      if (alive) { const r0 = R + 3.5 * s;
+        for (let i = 0; i < nb; i++) { const ang = i * Math.PI * 2 / nb - Math.PI / 2 + A.spin * 0.25; const calm = (1.2 + 1.0 * Math.sin(A.breathe * 1.4 + i * 0.55)) * s; const len = calm + (2 + 15 * A.bars[i]) * s;
+          const a = 0.18 + 0.75 * A.bars[i] + (thinking ? 0.12 * noise1(i + 7, t * 3) : 0); bar(cx, cy, ang, r0, len, (1.6 + 1.2 * A.bars[i]) * s, rgba(speaking ? light : mix(base, [1, 1, 1], 0.3), Math.min(1, a))); } } }
+    // 5 orbiters
+    const orbs = [];
+    if (thinking) { for (let k = 0; k < 3; k++) { const tilt = 0.5 + k * 1.05; for (let trail = 0; trail < 5; trail++) { const a = t * (2.4 + 0.5 * k) + k * 2.094 - trail * 0.16; const ex = Math.cos(a) * R * 1.55, ey = Math.sin(a) * R * 0.42;
+      orbs.push({ x: cx + ex * Math.cos(tilt) - ey * Math.sin(tilt), y: cy + ex * Math.sin(tilt) + ey * Math.cos(tilt), depth: Math.sin(a), size: (2.6 - trail * 0.4) * s, alpha: trail === 0 ? 0.95 : 0.55 - trail * 0.1 }); } }
+      for (const ob of orbs) if (ob.depth < 0) circle(ob.x, ob.y, ob.size * 0.85, rgba(light, ob.alpha * 0.45)); }
+    // 6 sphere
+    shadow({ x: cx - R, y: cy - R, w: 2 * R, h: 2 * R }, R, 10 * s);
+    radial(cx, cy, R, R, cx - R * 0.32, cy - R * 0.36, [[0, mix(light, [1, 1, 1], 0.35), 1], [0.35, mix(base, light, 0.25), 1], [0.8, base, 1], [1, deep, 1]]);
+    circle(cx, cy, R, rgba(deep, 0.35), false, 1 * s);
+    radial(cx - R * 0.3, cy - R * 0.38, R * 0.42, R * 0.30, cx - R * 0.34, cy - R * 0.42, [[0, [1, 1, 1], 0.42], [1, [1, 1, 1], 0]]);
+    if (thinking) for (const ob of orbs) if (ob.depth >= 0) circle(ob.x, ob.y, ob.size, rgba([1, 1, 1], ob.alpha));
+    // 7 glyph
+    const fg = rgba([1, 1, 1], 0.95);
+    if (speaking) { for (let i = 0; i < 5; i++) { const h = (4 + 13 * clamp(A.out * (0.6 + 0.4 * noise1(i + 3, t * 2.2)), 0, 1)) * s; rrect({ x: cx - 12 * s + i * 6 * s, y: cy - h / 2, w: 3 * s, h }, 1.5 * s, fg); } }
+    else if (mic) icon('mic', cx, cy, (19 + 7 * A.in) * s, fg, 2);
+    else if (thinking && !toolRunning) icon('live', cx, cy, 20 * s, rgba([1, 1, 1], 0.75 + 0.25 * Math.sin(t * 6)), 1.9);
+    else if (toolRunning) { const a0 = (t * 4) % (Math.PI * 2); for (let i = 0; i < 14; i++) { const a = a0 + i * 0.22; circle(cx + Math.cos(a) * 8 * s, cy + Math.sin(a) * 8 * s, 1.6 * s, rgba([1, 1, 1], 1 - i / 14)); } }
+    else icon('live', cx, cy, 22 * s, fg, 1.9);
+    // 8 buttons
+    if (A.hover > 0.02) { const tiny = (b, ic, bh) => { const a = A.hover, bb = { x: b.x, y: b.y + (1 - a) * 8 * s, w: b.w, h: b.h }; shadow(bb, bb.w / 2, 6 * s); circle(bb.x + bb.w / 2, bb.y + bb.h / 2, bb.w / 2, rgba(bh ? c.hover : c.panel2, a)); circle(bb.x + bb.w / 2, bb.y + bb.h / 2, bb.w / 2, rgba(c.border, a), false, 1); icon(ic, bb.x + bb.w / 2, bb.y + bb.h / 2, 11.5 * s, rgba(bh ? c.text : c.textDim, a), 1.8); };
+      tiny(bExpand, 'expand', hExpand); tiny(bClose, 'x', hClose); }
+    // 9 caption
+    let cap = '', capCol = c.text;
+    if (err) { cap = 'You exceeded your current quota (1011)'; capCol = c.danger; }
+    else if (state === 'off') cap = 'Click to talk';
+    else if (speaking) cap = 'The map has nine clusters; the largest one is about machine learning in materials science.';
+    else if (toolRunning) cap = 'Working: Build a map: co-occurrence of keywords';
+    if (cap) { ctx.font = `${12 * s}px "Segoe UI", system-ui, sans-serif`; const maxW = Math.min(300 * s, o.x - 40 * s) - 20 * s; const words = cap.split(' '); const lines = []; let cur = '';
+      for (const w of words) { const tst = cur ? cur + ' ' + w : w; if (ctx.measureText(tst).width > maxW && cur) { lines.push(cur); cur = w; } else cur = tst; } if (cur) lines.push(cur);
+      const tw = Math.min(maxW, Math.max(...lines.map(l => ctx.measureText(l).width))) + 2, th = lines.length * 16 * s;
+      const cb = { x: o.x - 16 * s - (tw + 20 * s), y: Math.round(cy - (th + 14 * s) / 2), w: tw + 20 * s, h: th + 14 * s };
+      shadow(cb, 10 * s, 8 * s); rrect(cb, 10 * s, rgba(c.panel2), rgba(c.border)); circle(cb.x + cb.w + 5 * s, cy, 3 * s, rgba(c.panel2)); circle(cb.x + cb.w + 5 * s, cy, 3 * s, rgba(c.border), false, 1);
+      ctx.fillStyle = rgba(capCol); ctx.textBaseline = 'top'; lines.forEach((l, i) => ctx.fillText(l, cb.x + 10 * s, cb.y + 7 * s + i * 16 * s)); }
+    if (doExpand) setMini(false);
+    if (doMic) { state = state === 'listening' ? 'idle' : 'listening'; syncButtons(); }
+  };
+
+  const drawPanel = () => { const c = C(), r = panelRect(); shadow(r, 12 * s, 18 * s); rrect(r, 12 * s, rgba(c.panel2), rgba(c.border));
+    circle(r.x + 18 * s, r.y + 18 * s, 4.2 * s, rgba(c.ok)); ctx.font = `600 ${13 * s}px "Segoe UI", system-ui, sans-serif`; ctx.fillStyle = rgba(c.text); ctx.textBaseline = 'middle'; ctx.fillText('Live', r.x + 30 * s, r.y + 18 * s);
+    ctx.font = `${11 * s}px "Segoe UI", system-ui, sans-serif`; ctx.fillStyle = rgba(c.textFaint); ctx.fillText('Gemini 3.8 Live · the panel (transcript, tools, composer)', r.x + 62 * s, r.y + 18 * s);
+    ctx.fillStyle = rgba(c.textDim); ctx.fillText('Click the ⇄ button on the right to see the transition again.', r.x + 16 * s, r.y + 60 * s);
+    // the "orb" header button
+    const b = { x: r.x + r.w - 30 * s - 28 * s * 2, y: r.y + 5 * s, w: 26 * s, h: 26 * s }; const hv = has(b, mouse.x, mouse.y);
+    rrect(b, 6 * s, hv ? rgba(c.hover) : 'rgba(0,0,0,0)'); circle(b.x + b.w / 2, b.y + b.h / 2, 6 * s, rgba(c.textDim), false, 1.6); circle(b.x + b.w / 2, b.y + b.h / 2, 2 * s, rgba(c.textDim));
+    if (hv && mouse.pressed) setMini(true); cv.style.cursor = hv ? 'pointer' : 'default'; };
+
+  const drawMorph = (u, t) => { const c = C(), panel = panelRect(), o = orbRect(), toOrb = morphTo, k = toOrb ? easeInOutCubic(u) : easeOutCubic(u);
+    const L = (a, b) => ({ x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k, w: a.w + (b.w - a.w) * k, h: a.h + (b.h - a.h) * k });
+    const cur = toOrb ? L(panel, o) : L(o, panel), rad = toOrb ? 12 * s + (o.w / 2 - 12 * s) * k : o.w / 2 + (12 * s - o.w / 2) * k, orbness = toOrb ? k : 1 - k;
+    const base = A.col || c.accent, cx = cur.x + cur.w / 2, cy = cur.y + cur.h / 2, gr = Math.max(cur.w, cur.h) * (0.7 + 0.5 * orbness);
+    radial(cx, cy, gr, gr, cx, cy, [[0, base, 0.28 * orbness], [1, base, 0]]); shadow(cur, rad, 14 * s); rrect(cur, rad, rgba(mix(c.panel2, base, orbness * orbness)), rgba(c.border, 1 - orbness));
+    const ha = (1 - orbness) ** 2; if (ha > 0.02 && cur.w > 120 * s) { circle(cur.x + 18 * s, cur.y + 18 * s, 4.2 * s, rgba(c.ok, ha)); ctx.font = `600 ${13 * s}px "Segoe UI", system-ui, sans-serif`; ctx.fillStyle = rgba(c.text, ha); ctx.textBaseline = 'middle'; ctx.fillText('Live', cur.x + 30 * s, cur.y + 18 * s); }
+    if (orbness > 0.5) icon('live', cx, cy, 22 * s * (orbness - 0.5) * 2, rgba([1, 1, 1], (orbness - 0.5) * 2), 1.9); };
+
+  const setMini = (m) => { if (m !== mini) { morphTo = m; morphT0 = performance.now() / 1000; } mini = m; };
+
+  const frame = () => { const t = performance.now() / 1000; ctx.clearRect(0, 0, W, H); const c = C();
+    // a hint of a workspace: faint dots
+    ctx.fillStyle = dark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.06)'; for (let x = 24; x < W - 320; x += 28) for (let y = 24; y < H; y += 28) { ctx.beginPath(); ctx.arc(x, y, 1, 0, 7); ctx.fill(); }
+    ctx.font = `${12 * s}px "Segoe UI", system-ui, sans-serif`; ctx.fillStyle = rgba(c.textFaint); ctx.textBaseline = 'top'; ctx.fillText('the workspace (map canvas)', 24, 24);
+    if (morphT0 >= 0) { const u = (t - morphT0) / 0.45; if (u < 1) drawMorph(u, t); else { morphT0 = -1; if (mini) { A.ripples.push({ t0: t, r0: orbRect().w * 0.45, a: 0.5 }); A.ripples.push({ t0: t - 0.15, r0: orbRect().w * 0.45, a: 0.35 }); } } }
+    if (morphT0 < 0) { if (mini) drawOrb(t); else drawPanel(); }
+    mouse.pressed = false; mouse.clicked = false; mouse.dbl = false; frameCount++; requestAnimationFrame(frame); };
+
+  cv.addEventListener('mousemove', e => { const r = cv.getBoundingClientRect(); mouse.x = e.clientX - r.left; mouse.y = e.clientY - r.top; });
+  cv.addEventListener('mouseleave', () => { mouse.x = mouse.y = -1; });
+  cv.addEventListener('mousedown', e => { if (e.button === 0) { mouse.down = true; mouse.pressed = true; } if (e.button === 2) { const o = orbRect(); if (mini && Math.hypot(mouse.x - o.x - o.w / 2, mouse.y - o.y - o.h / 2) <= o.w * 0.6) setMini(false); } });
+  cv.addEventListener('mouseup', e => { if (e.button === 0) { mouse.down = false; mouse.clicked = true; } });
+  cv.addEventListener('dblclick', () => { mouse.dbl = true; });
+  cv.addEventListener('contextmenu', e => e.preventDefault());
+  const syncButtons = () => document.querySelectorAll('#states button').forEach(b => b.classList.toggle('on', b.dataset.s === state));
+  document.querySelectorAll('#states button').forEach(b => b.addEventListener('click', () => { state = b.dataset.s; syncButtons(); }));
+  document.getElementById('lvl').addEventListener('input', e => lvlUser = e.target.value / 100);
+  document.getElementById('pat').addEventListener('click', () => { autoPattern = true; document.getElementById('pat').classList.add('on'); document.getElementById('patc').classList.remove('on'); });
+  document.getElementById('patc').addEventListener('click', () => { autoPattern = false; document.getElementById('patc').classList.add('on'); document.getElementById('pat').classList.remove('on'); });
+  document.getElementById('morph').addEventListener('click', () => setMini(!mini));
+  document.getElementById('theme').addEventListener('click', () => { dark = !dark; document.body.classList.toggle('light', !dark); });
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

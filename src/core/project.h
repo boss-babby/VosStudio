@@ -8,6 +8,7 @@
 #include "figure.h"
 #include "stats.h"
 #include "charts.h"
+#include "library.h"
 
 namespace vs {
 
@@ -53,6 +54,7 @@ class Project {
   string path;        // last saved/opened .vosproj
   string mapSource;   // "analysis", "vosviewer", "bundle"
   bool dirty = false;
+  int lastRecordIdConflicts = 0;  // count of imported IDs reassigned because they already belong to this project
   BuildReport last;
   // map history saved with the project; the entry at mapCur is the current map (net/spec/params above)
   vector<SavedMap> maps;
@@ -61,6 +63,8 @@ class Project {
   // check when the project opens: {query, kind, sem[], field, mode, max, strategy, strict, lastCheck, auto, lastNew}
   Json living = Json::object();
   Json assistant = Json::array();  // AI assistant conversation (ai::Turn list), saved with the project
+  Json document = Json();          // the writing studio's document (doc.h docToJson), saved with the project; Null = none
+  PdfLibrary library;              // the reading library (1.15): attached PDFs, highlights, notes, coding
   ItemMetrics metrics;
   bool metricsValid = false;
 
@@ -71,8 +75,12 @@ class Project {
   // data
   int addFile(const string& name, const string& text, string* err = nullptr);  // returns records added
   int addSample(bool scopus);
-  int addRecords(const string& name, BibFormat f, vector<Record>& recs);  // moves recs in, dedups
+  int addRecords(const string& name, BibFormat f, vector<Record>& recs);  // moves records in; duplicate candidates remain intact for user review
   void clearCorpus();
+  // Removes one imported file (1.9.2): records that only this file brought disappear, records shared with other files
+  // stay. Record indices in the current map and the map history are remapped. Returns the number of records removed,
+  // -1 when the provenance is unknown (project saved by an older version) or k is out of range.
+  int removeFile(int k);
   void corpusChanged();  // invalidate caches after cleaning / thesaurus edits
   uint64_t corpusVersion = 0;  // changes whenever the corpus or its cleaning changes (unique across projects)
 

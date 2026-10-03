@@ -62,8 +62,24 @@ class Gfx {
   void trim();               // release transient GPU memory (minimised)
   bool readback(vector<uint8_t>& bgra, int& w, int& h);  // current back buffer
   bool savePngWic(const string& path, int w, int h, const uint8_t* bgra, double dpi);
+  bool encodeJpegWic(int w, int h, const uint8_t* bgra, float quality, string& out);  // in-memory JPEG (pictures for the live assistant)
 
-  IDWriteTextFormat* format(float size, int weight = 400, bool mono = false, bool italic = false);
+  // Copies of the back buffer taken between two drawing passes (Direct2D commands are flushed first). They let the
+  // application redraw only the layer that changed: the canvas copy holds the map (GPU render + labels) so that a
+  // hover over a panel redraws just the chrome; the overlay copy holds the whole window without the Live assistant's
+  // overlay so that its orb can move alone. The copies live on the GPU; nothing is read back.
+  struct BackCopy {
+    Com<ID3D11Texture2D> tex;
+    Com<ID2D1Bitmap1> bmp;
+    int w = 0, h = 0;
+    bool valid = false;
+  };
+  BackCopy canvasCopy, overlayCopy;
+  bool copyCapture(BackCopy& c);         // copy the current back buffer (call between drawing passes, inside or outside BeginDraw)
+  bool copyRestore(const BackCopy& c);   // draw the copy over the whole target (inside BeginDraw); false = nothing drawn
+  void copyDrop(BackCopy& c);
+
+  IDWriteTextFormat* format(float size, int weight = 400, bool mono = false, bool italic = false, bool wrap = false);
   string resolveFamily(const vector<string>& candidates);
   ID2D1SolidColorBrush* br(const Color& c) { brush->SetColor(d2c(c)); return brush.get(); }
 
@@ -77,6 +93,9 @@ class Gfx {
 void drawScene(ID2D1RenderTarget* rt, ID2D1Factory* f, IDWriteFactory* dw, Gfx& g, const Scene& sc, float ox, float oy, float scale, bool serif = false);
 // Render a Scene at dpi to a top-down BGRA buffer via a WIC bitmap render target
 bool renderSceneBGRA(Gfx& g, const Scene& sc, double dpi, vector<uint8_t>& bgra, int& w, int& h, bool transparent = false);
+// Preserve scene paint order by rasterizing each contiguous non-text run into a cropped transparent image layer;
+// text primitives remain native SVG/PDF text. The raster layers are embedded (no sidecar assets).
+bool makeHybridScene(Gfx& g, const Scene& source, double dpi, Scene& hybrid, string* err = nullptr);
 bool exportScenePNG(Gfx& g, const Scene& sc, double dpi, const string& path, string* err, bool transparent = false);
 
 // UTF-8 helpers for DirectWrite

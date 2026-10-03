@@ -625,8 +625,9 @@ string taskPrompt(Task t, const string& extra) {
              "2. Mark generic terms that say nothing about the topic here (for example \"study\", \"analysis\", \"review\", \"results\") to be ignored.\n"
              "Use only terms that appear in the list, spelled exactly as listed. Choose as target the clearest label, usually the most frequent one. "
              "Do not merge related but different concepts (for example \"machine learning\" and \"deep learning\"). Leave out anything you are unsure about.\n"
+             "Give every proposal a confidence between 0 and 1 (1 = certainly the same thing); proposals are shown ranked by it and a person approves each one.\n"
              "Reply with only a JSON object, no prose: {\"merge\": [{\"target\": \"...\", \"members\": [\"...\"], \"kind\": \"synonym|abbreviation|variant\", "
-             "\"reason\": \"a few words\"}], \"ignore\": [{\"term\": \"...\", \"reason\": \"a few words\"}]}\n\nTerms:\n" + x;
+             "\"reason\": \"a few words\", \"confidence\": 0.9}], \"ignore\": [{\"term\": \"...\", \"reason\": \"a few words\", \"confidence\": 0.8}]}\n\nTerms:\n" + x;
     case Task::Agent: return x;
     case Task::Methods:
       return "Write a publication-ready methods paragraph for this bibliometric analysis, based on the method details given. "
@@ -637,6 +638,7 @@ string taskPrompt(Task t, const string& extra) {
 }
 
 // ================================================================= structured replies
+string extractJsonBlock(const string& reply, char open, char close);
 static string extractJson(const string& reply, char open, char close) {
   size_t a = reply.find(open), b = reply.rfind(close);
   if (a == string::npos || b == string::npos || b <= a) return "";
@@ -685,12 +687,14 @@ bool parseCleanPlan(const string& reply, vector<CleanProposal>& out) {
     p.kind = lower(trim(m["kind"].str("synonym")));
     if (p.kind.empty()) p.kind = "synonym";
     p.reason = trim(m["reason"].str());
+    p.confidence = clampv(m["confidence"].num(0), 0.0, 1.0);
     if (!p.target.empty() && !p.members.empty()) out.push_back(p);
   }
   for (auto& g : j["ignore"].a) {
     CleanProposal p;
     p.target = trim(g.t == Json::Str ? g.str() : g["term"].str());
     p.reason = g.t == Json::Str ? string() : trim(g["reason"].str());
+    p.confidence = g.t == Json::Str ? 0 : clampv(g["confidence"].num(0), 0.0, 1.0);
     p.kind = "generic";
     p.ignore = true;
     if (!p.target.empty()) out.push_back(p);
@@ -717,33 +721,119 @@ const vector<ToolSpec>& agentTools() {
       {"get_methods", "{}", "The methods paragraph of the current map.", ToolKind::Read},
       {"show_view", "{\"view\": \"network|overlay|density|timeline|matrix|geo|3d\"}", "Switches the map view the user sees.", ToolKind::View},
       {"focus_item", "{\"label\": \"...\"}", "Selects an item on the map and zooms to it.", ToolKind::View},
-      {"focus_cluster", "{\"cluster\": 1}", "Highlights one cluster on the map.", ToolKind::View},
-      {"open_page", "{\"page\": \"data|build|look|analyse|trends|actors|publish\"}", "Opens a page of the left panel.", ToolKind::View},
+      {"focus_cluster", "{\"cluster\": 1}",
+       "Highlights one cluster on the map. With linked selection (default on) the Trends and Actors pages, the papers table and the geo view then show only the records "
+       "behind that cluster; cluster 0 clears the highlight.", ToolKind::View},
+      {"show_compare", "{\"kind\": \"periods|sources|thresholds\", \"layout\": \"side_by_side|difference|none\", \"a_from\": 0, \"a_to\": 0, \"b_from\": 0, \"b_to\": 0, "
+                       "\"file_a\": \"\", \"file_b\": \"\", \"min_a\": 0, \"min_b\": 0}",
+       "Compare mode. kind periods: two year ranges (omit the years to keep the current ones or split the data in halves); sources: two imported files (names or 1-based "
+       "numbers); thresholds: the same map at two minimum item weights. layout side_by_side puts both sides into the main area on the map's own layout (circle size = "
+       "share of documents on that side, absent items faded); difference colours the map by the change from A to B (not for thresholds). layout none closes the comparison. "
+       "Returns the counts.", ToolKind::View},
+      {"open_page", "{\"page\": \"data|build|look|analyse|trends|actors|read|write|publish\", \"tab\": \"\"}",
+       "Opens a page of the left panel, optionally on a tab. Analyse tabs: clusters, items, network, stability. Trends tabs: growth, bursts, themes, compare, "
+       "three_field, topics, rpys, main_path. Actors tabs: authors, sources, countries, organisations, documents, laws.", ToolKind::View},
       {"build_map", "{\"type\": \"cooccurrence|coauthorship|citation|coupling|cocitation\", \"unit\": \"keywords|all_keywords|index_terms|terms|authors|organisations|countries|documents|sources|references|cited_sources|cited_authors\", \"counting\": \"full|fractional\", \"min\": 5, \"max_items\": 1000, \"from_year\": 0, \"to_year\": 0}",
        "Builds a new map (layout and clusters). Omitted fields keep sensible defaults for the type and unit.", ToolKind::Change},
       {"recluster", "{\"resolution\": 1.0, \"min_cluster_size\": 1, \"method\": \"vosviewer|modularity\"}", "Re-runs the clustering of the current map with new settings (omitted = unchanged).", ToolKind::Change},
       {"name_clusters", "{\"names\": [{\"cluster\": 1, \"name\": \"...\"}]}", "Writes cluster names onto the map (cluster numbers as shown).", ToolKind::Change},
       {"merge_terms", "{\"unit\": \"keywords\", \"merges\": [{\"target\": \"...\", \"members\": [\"...\"]}], \"ignore\": [\"...\"]}",
        "Adds merges and ignored terms to the thesaurus (applies to every map; rebuild to see it).", ToolKind::Change},
-      {"search_openalex", "{\"query\": \"...\", \"semantic\": false, \"from_year\": 0, \"to_year\": 0, \"max\": 300, \"append\": false}",
-       "Fetches works from OpenAlex (titles, abstracts, authors, sources, countries, references) and loads them as the data set; replaces the current records unless append is true. "
+      {"search_openalex", "{\"query\": \"...\", \"semantic\": false, \"from_year\": 0, \"to_year\": 0, \"max\": 300, \"append\": false, \"replace\": false}",
+       "Fetches works from OpenAlex (titles, abstracts, authors, sources, countries, references) and loads them as the data set. When records are already loaded the call is refused "
+       "unless append is true (add the works to them) or replace is true (discard them; only when the user asked to start over) - for a new topic call new_project first. "
        "Keyword search: 2 to 6 precise key terms; several alternative searches can be separated with ; and are merged. semantic true searches by meaning with a one or two sentence "
        "description (fewer, closely related works). max: 50 to 2000 works.", ToolKind::Change},
+      {"reading_list", "{\"filter\": \"all|to_read|reading|read|excluded\", \"query\": \"\"}",
+       "Reads the reading library (the Read stage): every attached PDF with its id (p1, p2, ...), the linked record (R-id), reading status, rating, tags and how many highlights and notes it has.", ToolKind::Read},
+      {"get_pdfs", "{\"papers\": \"all|selection|R3, R7\", \"retry\": false}",
+       "Downloads the open-access PDFs of records that have a DOI and no file yet and links them to the records: OpenAlex's cached copies (when the user set a free OpenAlex key), the open locations "
+       "OpenAlex and Unpaywall list, arXiv. papers: all, selection (the papers table's selection) or record ids. Papers that are not open access, or whose site refused the download, are reported with "
+       "the reason (they stay listed on the Read page for the user to attach by hand). retry true also tries the records whose last attempt ended without a file. Takes a few seconds per paper.", ToolKind::Change},
+      {"open_pdf", "{\"paper\": \"p3\", \"page\": 0}",
+       "Opens an attached PDF in the reader (optionally at a page, 1-based). paper is a library id from reading_list, a record id from read_papers, or words of the title.", ToolKind::View},
+      {"set_reading", "{\"paper\": \"p3\", \"status\": \"to_read|reading|read|excluded\", \"rating\": 0, \"tags\": \"\", \"note\": \"\"}",
+       "Updates the reading of an attached paper: status, rating 1-5 (0 clears), tags to add (comma-separated) and a note appended to its reading notes. Only what is given changes.", ToolKind::Change},
+      {"paper_notes", "{\"paper\": \"p3\"}",
+       "Returns the user's reading of a paper as Markdown: status, rating, tags, notes and every highlight with its code (Aim, Method, Finding, Theory, Gap, Quote, Question), the quoted passage, page and comment. Use it to summarise or synthesise what the user marked.", ToolKind::Read},
       {"read_papers", "{\"sort\": \"cited|recent|relevance\", \"n\": 12, \"query\": \"\", \"skip\": 0}",
        "Reads papers of the data set: id (R1, R2, ...), authors, year, title, source, citations, keywords and the start of the abstract. query keeps papers whose title, abstract "
        "or keywords contain all its words. n at most 30; skip pages through the list.", ToolKind::Read},
       {"add_chart", "{\"chart\": \"publications_per_year\", \"title\": \"\", \"caption\": \"\", \"unit\": \"all_keywords\"}",
-       "Adds a figure to the report. Charts from the records: publications_per_year, top_sources, top_authors, top_countries, top_organisations, most_cited, citation_classes, "
+       "Adds a figure to the document in the writer (at the end of the body, before the references). Charts from the records: publications_per_year, top_sources, top_authors, top_countries, top_organisations, most_cited, citation_classes, "
        "trend_topics, keyword_bursts, thematic_evolution, three_field, country_collaboration, production_over_time, bradford, lotka, rpys (needs references). "
        "From the current map: map_network, map_overlay (average year), map_density, map_geo (countries), strategic_diagram, difference_map (change between the periods of "
        "compare_periods), resolution_sweep (clusters and robustness per resolution). From the citations: main_path (the backbone of the citation network; needs references). unit applies to trend_topics, keyword_bursts, "
        "thematic_evolution and production_over_time. title and caption are optional (a caption explains what the figure shows).", ToolKind::View},
       {"add_section", "{\"title\": \"...\", \"text\": \"...\"}",
-       "Adds a text section to the report, after the figures and sections added so far. text is Markdown (paragraphs, - bullets, ### subheadings). "
-       "Cite papers by their ids from read_papers: [R3] or [R3, R8].", ToolKind::View},
-      {"get_report", "{}", "The report so far: its sections and figures in order.", ToolKind::Read},
-      {"export_report", "{\"title\": \"...\", \"subtitle\": \"\"}",
-       "Writes the report as one PDF: title, the sections and figures in the order added, and a numbered reference list of the cited papers. Returns the file path.", ToolKind::View},
+       "Adds a section (a Heading 1 with its text) to the document in the writer, after the sections and figures added so far and before the references. "
+       "text is Markdown (paragraphs, - bullets, ### subheadings, **bold**, | tables |); write full sections of 250 to 600 words, not summaries. Cite papers by "
+       "their ids from read_papers: [R3] or [R3, R8]; they become numbered references in the document's reference list. The user sees and edits the same "
+       "document in the writer, so never rewrite what they wrote without being asked.", ToolKind::View},
+      {"write_report", "{\"title\": \"\", \"sections\": [\"Introduction\", \"Research themes\", \"Trends\", \"Gaps and future directions\", \"Conclusion\"], \"instructions\": \"\", \"words_per_section\": 400, \"replace\": false}",
+       "Drafts long report sections with the application's text model (the AI Assistant's provider), which reads the loaded records, the most cited and most recent "
+       "papers, the map's clusters and the trends, and writes each section in academic prose with [R id] citations. Give the section titles (or omit them for a standard "
+       "literature review), instructions (topic, focus, audience, language, what to emphasise) and the words per section (150 to 900). replace = true rewrites the "
+       "existing sections of the document; otherwise the new ones are appended. Use it whenever the user wants a real report, a long text or more detail; then get_report to read it, "
+       "edit_section to adjust and export_report for the files. Everything lands in the writer's document, where the user edits it.", ToolKind::View},
+      {"edit_section", "{\"index\": 1, \"title\": \"\", \"text\": \"\", \"remove\": false}",
+       "Changes one section of the document (index as listed by get_report, 1 = the first Heading 1 section): a new title and/or a new text (Markdown, replaces "
+       "the section's body), or remove = true to delete it. Use get_report full = true first so you do not overwrite the user's own edits.", ToolKind::View},
+      {"get_report", "{\"full\": false}",
+       "The document in the writer: its outline (headings, figures, tables) and the sections with word and citation counts. full = true returns the complete text "
+       "of every section (Markdown) so you know exactly what it says, including what the user edited.", ToolKind::Read},
+      {"export_report", "{\"title\": \"...\", \"subtitle\": \"\", \"format\": \"pdf|docx|html|both|all\"}",
+       "Writes the document: title block (added when missing), the sections, figures and tables in their order, and the numbered reference list. format pdf (default) "
+       "gives a print-ready PDF; docx an editable Word file with real headings, tables, embedded figures and references; html one self-contained web page; both = pdf + docx; "
+       "all = the three. Returns the file path(s). The user can keep editing the same document in the writer (run_commands [\"writer on\"] opens it).", ToolKind::View},
+      // ---- the whole application: state, data, files, look, exports and the command language
+      {"get_ui_state", "{}",
+       "What the user sees right now: project and file, records, map, analysis settings, current view, page and tab, theme and look, search and selection, open "
+       "preview or chart, running task, map history, report. Read it before acting when you are unsure what is on screen.", ToolKind::Read},
+      {"load_data", "{\"source\": \"sample|sample_scopus|files|project\", \"paths\": [\"C:/data/file.txt\"], \"replace\": false}",
+       "Loads records or a project: the built-in Web of Science sample (140 records), the Scopus sample (90), bibliographic files (Web of Science, Scopus, RIS, "
+       "PubMed, CSV, OpenAlex exports; a VOSviewer map|network pair; several files are merged and de-duplicated) or a .vosproj project. Files and samples are added to the "
+       "loaded records; a project replaces everything and is refused while the current project has unsaved work unless replace is true.", ToolKind::Change},
+      {"new_project", "{\"discard_unsaved\": false}",
+       "Starts a blank project: no records, no map, nothing loaded. Use it when the user wants a new or separate project, or research on a new topic that should "
+       "not be mixed with the loaded records; then search_openalex or load_data. Refused while the current project has unsaved work unless discard_unsaved is true - "
+       "ask the user first (save_project keeps it). The user can undo it.", ToolKind::Change},
+      {"show_papers", "{\"query\": \"\", \"sort\": \"year|title|authors|source|citations\", \"descending\": true, \"detailed\": true, \"n\": 15}",
+       "Shows the papers table in the main area: every record as a sortable list (year, title, authors, source, citations), filtered by the query words "
+       "(all must match title, authors, source, keywords or year; 2015-2020 is a year range). Returns the first n rows with their R ids. The user can click rows "
+       "to preview papers. Use it when the user wants to see, browse or scan the papers; show_chart none or a map view brings the map back.", ToolKind::View},
+      {"show_chart", "{\"chart\": \"publications_per_year\", \"unit\": \"all_keywords\", \"n\": 15}",
+       "Puts a figure into the main area, large, so the user sees it while you explain: the same charts as add_chart (publications_per_year, top_sources, top_authors, "
+       "top_countries, top_organisations, most_cited, citation_classes, trend_topics, keyword_bursts, thematic_evolution, three_field, country_collaboration, "
+       "production_over_time, bradford, lotka, rpys, strategic_diagram, difference_map, resolution_sweep, main_path, records_flow) and the map views (map_network, "
+       "map_overlay, map_density, map_timeline, map_geo, map_3d, map_matrix). Returns what the figure shows. Call it once per figure, right before you talk about it, "
+       "to walk the user through several; chart none closes the figure and shows the map again.", ToolKind::View},
+      {"save_project", "{\"path\": \"\"}",
+       "Saves the project (records, maps, settings, report) as a .vosproj file. Without a path it saves to the project's file or to Documents\\VOSStudio\\Exports.", ToolKind::Change},
+      {"set_look", "{\"look\": \"vosviewer|studio|paper|midnight\", \"theme\": \"light|dark\", \"hulls\": true, \"cluster_names\": true, \"legend\": true, \"labels\": true, "
+       "\"label_halo\": true, \"link_geometry\": \"straight|curved|arc\", \"max_lines\": 1000, \"inspector\": true}",
+       "Changes how the map looks: a look preset, the light or dark theme, cluster hulls, cluster names, the legend, labels, label halos, the shape and maximum "
+       "number of links, and the right-hand inspector. Omitted fields stay as they are.", ToolKind::View},
+      {"export_figure", "{\"format\": \"png|svg|pdf\", \"path\": \"\", \"what\": \"figure|view\", \"panels\": \"all|network,overlay,density,timeline,geo,3d,matrix\", \"transparent\": false}",
+       "Exports the publication figure (what = figure: the panels chosen on the Publish page, or the panels given here) or the current view exactly as shown "
+       "(what = view) as PNG, SVG or PDF. Without a path the file goes to Documents\\VOSStudio\\Exports. Returns the file path.", ToolKind::View},
+      {"look_at_screen", "{\"what\": \"canvas\"}",
+       "Live sessions only: sends you a picture of the map canvas (what = canvas) or of the whole window (what = window) so you can see the map, its colours, labels "
+       "and layout, or a chart the user points at. One still image, taken when you call it; call it again when the view changes. Use it when the user asks you to look, "
+       "or when a question needs the picture rather than the data.", ToolKind::Read},
+      {"screenshot", "{\"path\": \"\", \"canvas_only\": false}",
+       "Saves a PNG screenshot of the whole window (or only the map canvas) to a file; useful after changing a view so the user has a picture. Returns the path.", ToolKind::View},
+      {"list_commands", "{}",
+       "The complete reference of the application's commands for run_commands: syntax, arguments and effect of every command, grouped by area.", ToolKind::Read},
+      {"run_commands", "{\"commands\": [\"view overlay\", \"page trends\", \"tab 1\"]}",
+       "Runs application commands in order, exactly as a user working the interface would, and waits for each to finish (builds, imports and searches included). "
+       "This reaches every feature of the application: data (sample, open, openproj, save, records), analysis (type, unit, min, build, relayout, bundle, sweep, "
+       "useres, run bursts|stability), views and pages (view, page, tab, zoom, orbit, inspector, start 0), look (theme, look, hulls, names, legend, linkgeom, maxlines), "
+       "search and selection (search, select, clearsearch, preview, maps), comparisons (diffmap, diffclear, mainpathroutes, expand strategic, expandflow, closechart), "
+       "geography (geolayer, geofill, geodenstyle, geodenmeasure, geosel), publishing (figpanels, figopt, figzoom, svg|pdf|png, viewsvg|viewpdf|viewpng, chartspdf, "
+       "flowsvg, shot, viewshot), OpenAlex (oaquery, oamax, oafrom, oakind, oasem, oasemq, oafetch), term cleaning (cleanunit, cleanscan, cleanai, cleanpick, "
+       "cleanlabel, cleanmerge, cleanundo) and living maps (livingcheck, livingadd, livingauto). Call list_commands once for the exact syntax when unsure. "
+       "Returns what each command did and the state of the interface afterwards.", ToolKind::Change},
   };
   return t;
 }
@@ -752,6 +842,8 @@ const ToolSpec* findTool(const string& name) {
   for (auto& t : agentTools()) if (name == t.name) return &t;
   return nullptr;
 }
+
+string extractJsonBlock(const string& reply, char open, char close) { return extractJson(reply, open, close); }
 
 string agentSystemPrompt() {
   string s =
@@ -768,7 +860,15 @@ string agentSystemPrompt() {
       "- After each tool call you receive a message that starts with \"Tool result\". If a tool fails, adapt the arguments or choose another tool.\n"
       "- Use at most " + std::to_string(kAgentMaxSteps) + " tool calls. Finish as soon as the goal is reached.\n"
       "- The final answer is concise and specific, grounded in the tool results, and says what you changed in the project, if anything.\n"
-      "- Write for researchers. No technical jargon about the application's internals.\n\n"
+      "- Write for researchers. No technical jargon about the application's internals.\n"
+      "- You can do everything a user can do in the application. Prefer the typed tools; for anything they do not cover (views, pages and tabs, "
+      "trends, comparison, geo, publishing, OpenAlex, cleaning, living maps, exports) call get_ui_state to see what is on screen, list_commands once, "
+      "then run_commands. Do not ask the user for things a tool can tell you.\n"
+      "- The loaded records are the user's work. Never replace or discard them on your own: to add data use append; for a new topic or a new project call "
+      "new_project first (it refuses while unsaved work exists - then ask whether to save or discard); pass replace or discard_unsaved only when the user "
+      "clearly asked to start over. Tools refuse destructive calls and tell you the alternatives.\n"
+      "- Report only what the tool results confirm. A tool result describes what really happened on screen (what is shown, opened, loaded); if it says "
+      "something was refused or not found, say so instead of claiming success.\n\n"
       "Literature reports. When the user asks for a literature review, summary or report on a topic, work through these steps without asking the user in between:\n"
       "1. If no records are loaded, or the loaded records are about another topic, call search_openalex (300 works is a good default, up to 1000 for broad fields; "
       "set from_year/to_year when the user names a period).\n"
@@ -776,11 +876,17 @@ string agentSystemPrompt() {
       "3. Add 3 to 6 charts that support the text: publications_per_year first, then for example top_sources, top_countries, most_cited, trend_topics or keyword_bursts.\n"
       "4. Build a keyword co-occurrence map (build_map with unit all_keywords), read the clusters, name them with name_clusters and add the map_network figure "
       "(map_overlay shows which themes are recent).\n"
-      "5. Write the sections with add_section, in this order: Introduction (topic, scope and data), Research themes (one paragraph per cluster or theme), "
-      "Trends and emerging topics, Research gaps and future directions, Conclusion. 150 to 400 words each, in an academic style. Figures appear where you add them, "
-      "so add each chart before or after the section that discusses it and refer to it in the text (\"Figure 1 shows ...\").\n"
+      "5. Write the sections: call write_report (the text model drafts every section at full length, 300 to 600 words each, with citations) or write them yourself "
+      "with add_section, in this order: Introduction (topic, scope and data), Research themes (one paragraph per cluster or theme), "
+      "Trends and emerging topics, Research gaps and future directions, Conclusion. Never hand in short summaries when a report was asked for. Figures appear "
+      "where you add them, so add each chart before or after the section that discusses it and refer to it in the text (\"Figure 1 shows ...\"). "
+      "Read the result with get_report (full = true) and fix weak parts with edit_section.\n"
       "6. Cite only papers you have read, by their ids ([R12]); state only what the papers and the tool results support. Never invent papers, authors or numbers.\n"
-      "7. export_report with a clear title. The final answer summarises the main findings in 3 to 5 sentences and says the PDF was saved.\n\n"
+      "7. export_report with a clear title (format pdf, docx for a Word file the user can edit, html, or all). The final answer summarises the main findings in 3 to 5 "
+      "sentences and says which file was saved, and that the document can be edited in the writer (writer on).\n\n"
+      "Comparison and selection. show_compare puts two periods, two imported files or two thresholds side by side in the main area (or colours the map as a "
+      "difference map); focus_cluster with linked selection makes the Trends and Actors pages, the papers table and the geo view follow one cluster - use it to "
+      "answer questions about one theme, and focus_cluster 0 to widen the view again.\n\n"
       "Tools:\n";
   for (auto& t : agentTools()) {
     s += string("- ") + t.name + " " + t.args + (t.kind == ToolKind::Change ? " [change]" : t.kind == ToolKind::View ? " [view]" : "") + ": " + t.desc + "\n";

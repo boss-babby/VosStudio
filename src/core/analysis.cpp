@@ -622,7 +622,7 @@ const RawNet& AnalysisEngine::pairsFor(const AnaSpec& s) {
     vector<int> off(size_t(n) + 1, 0);
     for (auto& ds : R.docSets) for (int i : ds) if (pass[size_t(i)]) off[size_t(i) + 1]++;
     for (int i = 0; i < n; i++) off[size_t(i) + 1] += off[size_t(i)];
-    vector<int> docs(size_t(off[size_t(n)]));
+    vector<int> docs(static_cast<size_t>(off[size_t(n)]));
     { vector<int> p(off.begin(), off.end() - 1); for (size_t d = 0; d < R.docSets.size(); d++) for (int i : R.docSets[d]) if (pass[size_t(i)]) docs[size_t(p[size_t(i)]++)] = int(d); }
     for (int a = 0; a < n; a++) {
       if (!pass[size_t(a)]) continue;
@@ -881,6 +881,18 @@ Network AnalysisEngine::build(const AnaSpec& s) {
 
 // ------------------------------------------------------------ variants
 static string singular(const string& w) {
+  static const std::map<string, string> irregular = {
+      {"analyses", "analysis"}, {"hypotheses", "hypothesis"}, {"theses", "thesis"}, {"diagnoses", "diagnosis"}, {"prognoses", "prognosis"},
+      {"syntheses", "synthesis"}, {"crises", "crisis"}, {"bases", "basis"}, {"axes", "axis"}, {"criteria", "criterion"}, {"phenomena", "phenomenon"},
+      {"indices", "index"}, {"matrices", "matrix"}, {"vertices", "vertex"}, {"appendices", "appendix"}, {"taxa", "taxon"}, {"strata", "stratum"},
+      {"spectra", "spectrum"}, {"curricula", "curriculum"}, {"media", "medium"}, {"bacteria", "bacterium"}, {"fungi", "fungus"}, {"nuclei", "nucleus"},
+      {"stimuli", "stimulus"}, {"radii", "radius"}, {"foci", "focus"}, {"loci", "locus"}, {"alumni", "alumnus"}, {"children", "child"}, {"women", "woman"},
+      {"men", "man"}, {"people", "person"}, {"mice", "mouse"}, {"feet", "foot"}, {"teeth", "tooth"}, {"schemata", "schema"}, {"corpora", "corpus"},
+      {"genera", "genus"}, {"larvae", "larva"}, {"algae", "alga"}, {"antennae", "antenna"}, {"formulae", "formula"}, {"vertebrae", "vertebra"},
+      {"leaves", "leaf"}, {"lives", "life"}, {"knives", "knife"}, {"wolves", "wolf"}, {"halves", "half"}, {"shelves", "shelf"}, {"calves", "calf"},
+      {"quizzes", "quiz"}, {"heroes", "hero"}, {"potatoes", "potato"}, {"tomatoes", "tomato"}, {"echoes", "echo"}, {"cargoes", "cargo"}, {"volcanoes", "volcano"}};
+  auto it = irregular.find(w);
+  if (it != irregular.end()) return it->second;
   size_t n = w.size();
   if (n > 4 && endsWith(w, "ies")) return w.substr(0, n - 3) + "y";
   if (n > 4 && (endsWith(w, "sses") || endsWith(w, "xes") || endsWith(w, "ches") || endsWith(w, "shes"))) return w.substr(0, n - 2);
@@ -950,8 +962,237 @@ vector<std::pair<string, int>> termCounts(const Corpus& c, Unit unit, const Thes
   return out;
 }
 
+double variantScore(const string& reason) {
+  if (reason == "hyphen") return 0.98;
+  if (reason == "spelling") return 0.95;
+  if (reason == "plural") return 0.9;
+  if (reason == "author id") return 0.99;
+  if (reason == "acronym") return 0.7;
+  if (reason == "acronym (text)") return 0.65;
+  if (reason == "typo") return 0.5;
+  if (reason == "variant") return 0.6;
+  return 0.6;
+}
+
+void rankVariants(vector<VariantGroup>& v) {
+  for (auto& g : v) if (g.score <= 0) g.score = variantScore(g.reason);
+  std::stable_sort(v.begin(), v.end(), [](const VariantGroup& a, const VariantGroup& b) {
+    if (a.ai != b.ai) return a.ai;  // AI proposals first (they were asked for), each block ranked by confidence
+    if (std::fabs(a.score - b.score) > 1e-9) return a.score > b.score;
+    return a.targetCount > b.targetCount;
+  });
+}
+
+std::map<string, string> acronymDictionary(const Corpus& c) {
+  std::map<string, std::map<string, int>> votes;  // abbr -> long form -> count
+  auto scan = [&](const string& text) {
+    size_t p = 0;
+    while ((p = text.find('(', p)) != string::npos) {
+      size_t e = text.find(')', p);
+      if (e == string::npos) break;
+      string ab = text.substr(p + 1, e - p - 1);
+      p = e + 1;
+      if (ab.size() < 2 || ab.size() > 8) continue;
+      bool caps = true;
+      int letters = 0;
+      for (char ch : ab) {
+        if (isupper(uint8_t(ch))) letters++;
+        else if (!isdigit(uint8_t(ch)) && ch != '-' && ch != 's') caps = false;
+      }
+      if (!caps || letters < 2) continue;
+      if (ab.back() == 's' && letters >= 2) ab.pop_back();  // "(LLMs)"
+      // the long form: the preceding words, as many as the abbreviation has letters (allowing small function words)
+      size_t start = text.substr(0, p - ab.size() - 3).size();  // index of '('
+      size_t at = start;
+      while (at > 0 && text[at - 1] == ' ') at--;
+      vector<string> words;
+      size_t wend = at;
+      int need = 0;
+      for (char ch : ab) if (isalpha(uint8_t(ch))) need++;
+      while (int(words.size()) < need + 3 && wend > 0) {
+        size_t ws = wend;
+        while (ws > 0 && text[ws - 1] != ' ') ws--;
+        string w = text.substr(ws, wend - ws);
+        bool ok = !w.empty();
+        for (char ch : w) if (!isalnum(uint8_t(ch)) && ch != '-' && ch != '\'') ok = false;
+        if (!ok) break;
+        words.insert(words.begin(), w);
+        // does the initial-letter sequence of the collected words match the abbreviation?
+        string init;
+        for (auto& x : words) {
+          string lx = lower(x);
+          if (lx == "of" || lx == "and" || lx == "the" || lx == "for" || lx == "in" || lx == "on" || lx == "to" || lx == "with") continue;
+          init += char(toupper(uint8_t(x[0])));
+          for (size_t q = 0; q + 1 < x.size(); q++) if (x[q] == '-' && isalpha(uint8_t(x[q + 1]))) init += char(toupper(uint8_t(x[q + 1])));
+        }
+        string abl;
+        for (char ch : ab) if (isalpha(uint8_t(ch))) abl += char(toupper(uint8_t(ch)));
+        if (init == abl && words.size() >= 2) { votes[lower(ab)][lower(join(words, " "))]++; break; }
+        wend = ws;
+        while (wend > 0 && text[wend - 1] == ' ') wend--;
+      }
+    }
+  };
+  for (auto& r : c.recs) { scan(r.title); scan(r.abstract_); }
+  std::map<string, string> out;
+  for (auto& kv : votes) {
+    string best;
+    int bc = 0, tot = 0;
+    for (auto& f : kv.second) { tot += f.second; if (f.second > bc) { bc = f.second; best = f.first; } }
+    if (bc >= 2 || (bc == 1 && tot == 1 && best.size() > 8)) out[kv.first] = best;
+  }
+  return out;
+}
+
+namespace {
+struct AuthorName { string sur, ini, given; };
+AuthorName parseAuthor(const string& label) {
+  AuthorName a;
+  string l = lower(asciiFold(trim(label)));
+  size_t comma = l.find(',');
+  string given;
+  if (comma != string::npos) { a.sur = trim(l.substr(0, comma)); given = trim(l.substr(comma + 1)); }
+  else {
+    vector<string> w = split(l, ' ');
+    if (w.empty()) return a;
+    a.sur = w.back();
+    w.pop_back();
+    given = join(w, " ");
+  }
+  string sur;
+  for (char ch : a.sur) if (isalpha(uint8_t(ch))) sur += ch;
+  a.sur = sur;
+  for (auto& w : split(replaceAll(replaceAll(given, ".", " "), "-", " "), ' ')) {
+    if (w.empty() || !isalpha(uint8_t(w[0]))) continue;
+    a.ini += w[0];
+    if (w.size() > 1) a.given += (a.given.empty() ? "" : " ") + w;
+  }
+  return a;
+}
+}  // namespace
+
+vector<VariantGroup> findAuthorVariants(const Corpus& c) {
+  struct Info { string label; int count = 0; std::set<string> ids, affs, countries, coauthors; AuthorName name; };
+  std::map<string, Info> info;  // lower label -> info
+  for (auto& r : c.recs) {
+    std::set<string> affs, ctry;
+    for (auto& a : r.affiliations) affs.insert(lower(asciiFold(a)));
+    for (auto& a : r.countries) ctry.insert(lower(a));
+    for (size_t i = 0; i < r.authors.size(); i++) {
+      string lab = bibClean(r.authors[i]);
+      if (lab.empty()) continue;
+      Info& in = info[lower(lab)];
+      if (in.count == 0) { in.label = lab; in.name = parseAuthor(lab); }
+      in.count++;
+      if (i < r.authorIds.size() && !r.authorIds[i].empty()) in.ids.insert(r.authorIds[i]);
+      in.affs.insert(affs.begin(), affs.end());
+      in.countries.insert(ctry.begin(), ctry.end());
+      for (size_t j = 0; j < r.authors.size(); j++) if (j != i) in.coauthors.insert(lower(bibClean(r.authors[j])));
+    }
+  }
+  // candidates share a surname
+  std::map<string, vector<const Info*>> bySur;
+  for (auto& kv : info) if (!kv.second.name.sur.empty() && kv.second.name.sur.size() >= 2) bySur[kv.second.name.sur].push_back(&kv.second);
+  vector<VariantGroup> out;
+  for (auto& kv : bySur) {
+    auto& v = kv.second;
+    if (v.size() < 2 || v.size() > 400) continue;
+    size_t n = v.size();
+    vector<size_t> parent(n);
+    for (size_t i = 0; i < n; i++) parent[i] = i;
+    std::function<size_t(size_t)> find = [&](size_t x) { return parent[x] == x ? x : parent[x] = find(parent[x]); };
+    vector<double> best(n, 0);
+    vector<string> why(n);
+    struct Pair { size_t i, j; double sc; string ev; };
+    vector<Pair> pairs;
+    vector<char> incompat(n * n, 0);  // explicitly different people (other identifiers, other given names)
+    for (size_t i = 0; i < n; i++)
+      for (size_t j = i + 1; j < n; j++) {
+        const Info &A = *v[i], &B = *v[j];
+        // identifiers decide when both have them
+        bool shared = false, conflict = false;
+        for (auto& id : A.ids) if (B.ids.count(id)) shared = true;
+        if (!shared && !A.ids.empty() && !B.ids.empty()) conflict = true;
+        if (shared) {
+          string id;
+          for (auto& x : A.ids) if (B.ids.count(x)) { id = x; break; }
+          pairs.push_back({i, j, 0.99, id.compare(0, 7, "scopus:") == 0 ? "Scopus id " + id.substr(7) : id.compare(0, 9, "openalex:") == 0 ? "OpenAlex id " + id.substr(9) : id.compare(0, 4, "rid:") == 0 ? "ResearcherID " + id.substr(4) : "ORCID " + id});
+          continue;
+        }
+        if (conflict) { incompat[i * n + j] = incompat[j * n + i] = 1; continue; }
+        const string &ia = A.name.ini, &ib = B.name.ini;
+        if (ia.empty() || ib.empty()) continue;
+        bool same = ia == ib, prefix = !same && (ia.compare(0, std::min(ia.size(), ib.size()), ib.substr(0, std::min(ia.size(), ib.size()))) == 0);
+        if (!same && !prefix) { incompat[i * n + j] = incompat[j * n + i] = 1; continue; }
+        // full given names that differ ("John" vs "James") are different people even with equal initials
+        if (!A.name.given.empty() && !B.name.given.empty()) {
+          string ga = split(A.name.given, ' ')[0], gb = split(B.name.given, ' ')[0];
+          if (ga != gb && !(ga.size() >= 2 && gb.size() >= 2 && (startsWith(ga, gb) || startsWith(gb, ga)))) { incompat[i * n + j] = incompat[j * n + i] = 1; continue; }
+        }
+        int affs = 0, co = 0, ctry = 0;
+        for (auto& x : A.affs) if (B.affs.count(x)) affs++;
+        for (auto& x : A.coauthors) if (B.coauthors.count(x) && x != lower(A.label) && x != lower(B.label)) co++;
+        for (auto& x : A.countries) if (B.countries.count(x)) ctry++;
+        string ev = same ? "same initials" : "compatible initials";
+        double sc = 0;
+        if (affs > 0) { sc = same ? 0.9 : 0.8; ev += ", " + std::to_string(affs) + (affs == 1 ? " shared affiliation" : " shared affiliations"); }
+        else if (co > 0) { sc = same ? 0.85 : 0.72; ev += ", " + std::to_string(co) + (co == 1 ? " shared co-author" : " shared co-authors"); }
+        else if (ctry > 0 && same) { sc = 0.6; ev += ", same country"; }
+        else if (same && A.name.given.size() > 1 && B.name.given.size() > 1) { sc = 0.7; ev += ", same given name"; }
+        else if (same) { sc = 0.45; ev += " only"; }
+        else continue;  // prefix initials without any shared context: too weak to show
+        pairs.push_back({i, j, sc, ev});
+      }
+    // strongest evidence first; a link is dropped when it would put two explicitly different people in one group
+    std::stable_sort(pairs.begin(), pairs.end(), [](const Pair& a, const Pair& b) { return a.sc > b.sc; });
+    vector<vector<size_t>> members(n);
+    for (size_t i = 0; i < n; i++) members[i] = {i};
+    for (auto& p : pairs) {
+      size_t a = find(p.i), b = find(p.j);
+      if (a != b) {
+        bool clash = false;
+        for (size_t x : members[a]) { for (size_t y : members[b]) if (incompat[x * n + y]) { clash = true; break; } if (clash) break; }
+        if (clash) continue;
+        parent[a] = b;
+        members[b].insert(members[b].end(), members[a].begin(), members[a].end());
+        members[a].clear();
+      }
+      if (p.sc > best[p.i]) { best[p.i] = p.sc; why[p.i] = p.ev; }
+      if (p.sc > best[p.j]) { best[p.j] = p.sc; why[p.j] = p.ev; }
+    }
+    std::map<size_t, vector<size_t>> groups;
+    for (size_t i = 0; i < n; i++) groups[find(i)].push_back(i);
+    for (auto& g : groups) {
+      if (g.second.size() < 2) continue;
+      VariantGroup vg;
+      // target: the most frequent label; fuller given names win ties
+      size_t bi = g.second[0];
+      for (size_t i : g.second)
+        if (v[i]->count > v[bi]->count || (v[i]->count == v[bi]->count && v[i]->label.size() > v[bi]->label.size())) bi = i;
+      vg.target = v[bi]->label;
+      vg.targetCount = v[bi]->count;
+      double sc = 1;
+      for (size_t i : g.second) {
+        if (i == bi) continue;
+        vg.members.push_back(v[i]->label);
+        vg.counts.push_back(v[i]->count);
+        sc = std::min(sc, best[i]);
+        if (vg.evidence.empty() || best[i] < sc + 1e-9) vg.evidence = why[i];
+      }
+      vg.score = sc;
+      vg.reason = sc >= 0.99 ? "author id" : sc >= 0.8 ? "name + affiliation" : sc >= 0.7 ? "name + context" : "initials";
+      vg.safe = sc >= 0.99;
+      vg.apply = vg.safe;
+      out.push_back(vg);
+    }
+  }
+  rankVariants(out);
+  return out;
+}
+
 vector<VariantGroup> findVariants(const Corpus& c, Unit unit, const Thesaurus& th) {
   (void)th;
+  if (unit == Unit::Authors) return findAuthorVariants(c);
   std::map<string, int> cnt;       // label → count (first-seen label per key)
   std::map<string, string> keyLabel;
   for (auto& r : c.recs) {
@@ -1060,10 +1301,31 @@ vector<VariantGroup> findVariants(const Corpus& c, Unit unit, const Thesaurus& t
         }
       }
   }
-  std::sort(out.begin(), out.end(), [](const VariantGroup& a, const VariantGroup& b) {
-    if (a.safe != b.safe) return a.safe;
-    return a.targetCount > b.targetCount;
-  });
+  // acronyms expanded from the titles and abstracts: "ml" joins "machine learning" when both are terms
+  if (unit == Unit::Keywords || unit == Unit::IndexTerms || unit == Unit::AllKeywords) {
+    std::map<string, string> dict = acronymDictionary(c);
+    std::map<string, string> canonKey;  // canonical form -> a label key present in the data
+    for (auto& kv : cnt) canonKey.emplace(canon(kv.first, nullptr), kv.first);
+    for (auto& kv : dict) {
+      auto a = canonKey.find(canon(kv.first, nullptr)), l = canonKey.find(canon(kv.second, nullptr));
+      if (a == canonKey.end() || l == canonKey.end() || a->second == l->second) continue;
+      if (inGroup.count(a->second) && inGroup.count(l->second)) continue;
+      VariantGroup vg;
+      bool longBig = cnt[l->second] >= cnt[a->second];
+      vg.target = keyLabel[longBig ? l->second : a->second];
+      vg.targetCount = cnt[longBig ? l->second : a->second];
+      vg.members = {keyLabel[longBig ? a->second : l->second]};
+      vg.counts = {cnt[longBig ? a->second : l->second]};
+      vg.reason = "acronym (text)";
+      vg.evidence = "\"" + kv.second + " (" + upper(kv.first) + ")\" in titles or abstracts";
+      vg.safe = false;
+      vg.apply = false;
+      out.push_back(vg);
+      inGroup.insert(a->second);
+      inGroup.insert(l->second);
+    }
+  }
+  rankVariants(out);
   return out;
 }
 

@@ -36,8 +36,13 @@ void Ui::init(Gfx& gfx, HWND h) {
 }
 
 void Ui::setTheme(bool d) {
-  // Neutral desktop palette: grey chrome, white content, hairline separators, one accent used sparingly.
   dark = d;
+  c = palette(d);
+}
+
+UiColors Ui::palette(bool d) {
+  // Neutral desktop palette: grey chrome, white content, hairline separators, one accent used sparingly.
+  UiColors c;
   if (d) {
     c.bg = Color::hex(0x1e1e1e); c.rail = Color::hex(0x2a2a2a); c.panel = Color::hex(0x252525); c.panel2 = Color::hex(0x3a3a3c); c.card = Color::hex(0x2c2c2e);
     c.border = Color::hex(0x3a3a3a); c.borderStrong = Color::hex(0x4d4d50); c.text = Color::hex(0xf2f2f4); c.textDim = Color::hex(0xa1a1a6); c.textFaint = Color::hex(0x6e6e73);
@@ -51,24 +56,56 @@ void Ui::setTheme(bool d) {
     c.input = Color::hex(0xffffff); c.danger = Color::hex(0xd70015); c.warn = Color::hex(0xb25000); c.ok = Color::hex(0x248a3d); c.shadow = Color(0, 0, 0, 0.14f);
     c.sel = Color(0.f, 0.48f, 1.f, 0.13f);
   }
+  return c;
 }
 
-void Ui::beginFrame(const Input& input, double t) {
+void Ui::beginFrame(const Input& input, double t, bool partial) {
   in = input;
   time = t;
-  hitPrev_.swap(hitRects_);
-  hitRects_.clear();
+  frameNo_++;
+  textHitsPrev = textHits;
+  textMissesPrev = textMisses;
+  textHits = textMisses = 0;
+  if (frameNo_ % 120 == 0) textSweep();
+  partial_ = partial;
+  wakeAt = 0;
+  if (partial) {
+    // only a floating layer is redrawn: the top bar's widgets are still where the last full frame put them, so
+    // WM_NCHITTEST must keep seeing the widget rects from the last full frame.
+    hitPrev_ = hitRects_;
+    hitRects_ = hitBase_;
+    hoverHits_ = hoverBase_;
+  } else {
+    hitPrev_.swap(hitRects_);
+    hitRects_.clear();
+    hoverHits_.clear();
+  }
   animating = false;
   wantsCaret = false;
-  cursor = "arrow";
-  if (hotNext_ != hot) { hot = hotNext_; hotSince_ = t; }
+  // a partial frame happens only while the pointer rests: the hovered base widget, its tooltip and the cursor stay
+  // as the last full frame left them unless a widget of the floating layer takes over
+  if (!partial) cursor = "arrow";
+  if (!partial || hotNext_) { if (hotNext_ != hot) { hot = hotNext_; hotSince_ = t; } }
+  hotKeep_ = hot;
   hotNext_ = 0;
   overlays_.clear();
   popupRectPrev_ = popupRectNext_;
   popupRectNext_ = {-1, -1, 0, 0};
+  blockRect_ = {-1, -1, 0, 0};
   if (!popup_) popupRectPrev_ = {-1, -1, 0, 0};
+  touchTargetId_ = 0;
+  if (in.touch) {
+    const bool inPopup = (popupRectPrev_.w > 0 && popupRectPrev_.has(in.mx, in.my)) || (popupRectNext_.w > 0 && popupRectNext_.has(in.mx, in.my));
+    for (auto it = hoverBase_.rbegin(); it != hoverBase_.rend(); ++it) {
+      if (modal_ && !it->modal) continue;
+      if (inPopup && !it->overlay) continue;
+      if (it->clipped && !it->clip.has(in.mx, in.my)) continue;
+      if (it->r.has(in.mx, in.my)) { touchTargetId_ = it->id; break; }
+    }
+  }
+  tipKeep_ = partial ? tipNext_ : string();
   tipNext_.clear();
-  richTip_.clear();
+  if (!partial) richTip_.clear();
   wheelLeft_ = in.wheel;
   idStack_.clear();
   clips_.clear();
@@ -78,6 +115,7 @@ void Ui::beginFrame(const Input& input, double t) {
 }
 
 void Ui::endFrame() {
+  if (!partial_) { hitBase_ = hitRects_; hoverBase_ = hoverHits_; }  // remembered for overlay-only frames
   inOverlay_ = true;
   // overlays may queue further overlays (a combo inside a dialog): run passes until the queue is empty
   for (int pass = 0; pass < 4 && !overlays_.empty(); pass++) {
@@ -92,6 +130,11 @@ void Ui::endFrame() {
     bool inside = popupRectNext_.w > 0 && popupRectNext_.has(in.mx, in.my);
     if ((in.pressed[0] || in.pressed[1]) && !inside) popup_ = 0;
     if (in.key(VK_ESCAPE)) popup_ = 0;
+  }
+  // Commit this frame's hit target once. Hover feedback is already drawn from the current pointer; storing it now
+  // avoids a second frame solely to discover the same target, and starts the delayed-tooltip timer accurately.
+  if (!partial_ || hotNext_) {
+    if (hotNext_ != hot) { hot = hotNext_; hotSince_ = time; }
   }
   // immediate rich tooltip (charts, help icons)
   if (!richTip_.empty()) {
@@ -122,6 +165,7 @@ void Ui::endFrame() {
     tipNext_.clear();
   }
   // tooltip
+  if (partial_ && tipNext_.empty() && hot == hotKeep_) tipNext_ = tipKeep_;  // base-layer tooltip survives overlay-only frames
   if (!tipNext_.empty() && hot && !in.down[0]) {
     if (time - hotSince_ > 0.45) {
       float tw = std::min(textW(tipNext_, 12 * s) + 16 * s, 320 * s);
@@ -132,7 +176,7 @@ void Ui::endFrame() {
       shadow(r, 6 * s, 8 * s);
       fill(r, dark ? Color::hex(0x2a303a) : Color::hex(0x1f232a), 6 * s);
       textWrap({x + 8 * s, y + 5 * s, tw - 16 * s, th}, tipNext_, 12 * s, Color::hex(0xf2f4f8), 400, true);
-    } else animating = true;
+    } else wakeAt = hotSince_ + 0.45;
   }
   // toasts (bottom-right)
   float y = float(g->H) - 44 * s;
@@ -158,6 +202,10 @@ void Ui::endFrame() {
     y -= h + 8 * s;
   }
   if (!in.down[0] && !in.down[1] && !in.down[2]) active = 0;
+  if (in.touchCancel || (in.touch && in.released[0] && !in.down[0])) {
+    touchScrollId_ = 0;
+    touchScrollMoved_ = false;
+  }
   if (in.pressed[0] && focus && !mouseSel_) {
     // clicking outside a focused text box blurs it (the box re-claims focus on its own click)
   }
@@ -212,41 +260,100 @@ Com<IDWriteTextLayout> Ui::mkLayout(const string& t, float size, int weight, boo
   g->dw->CreateTextLayout(w.c_str(), UINT32(w.size()), g->format(size, weight, mono), maxW, 10000, L.put());
   return L;
 }
+
+// ---- layout cache
+uint64_t Ui::textKey(int kind, const string& t, float size, int weight, bool mono, float w, float h, int extra) {
+  uint64_t hh = 1469598103934665603ull ^ uint64_t(kind);
+  auto mix = [&](uint64_t v) { hh ^= v; hh *= 1099511628211ull; hh ^= hh >> 31; };
+  for (unsigned char ch : t) { hh ^= ch; hh *= 1099511628211ull; }
+  mix(uint64_t(std::lround(size * 100)));
+  mix(uint64_t(weight));
+  mix(mono ? 1 : 0);
+  mix(uint64_t(int64_t(std::lround(w * 4))) + 0x100000);   // quarter pixels
+  mix(uint64_t(int64_t(std::lround(h * 4))) + 0x100000);
+  mix(uint64_t(extra) + 0x1000);
+  return hh ? hh : 1;
+}
+Ui::TextEntry* Ui::textLookup(uint64_t key) {
+  if (!textCacheOn) return nullptr;
+  auto it = textCache_.find(key);
+  if (it == textCache_.end()) return nullptr;
+  it->second.seen = frameNo_;
+  textHits++;
+  return &it->second;
+}
+Ui::TextEntry& Ui::textStore(uint64_t key, TextEntry&& e) {
+  textMisses++;
+  e.seen = frameNo_;
+  if (!textCacheOn) { static TextEntry scratch; scratch = std::move(e); return scratch; }
+  if (textCache_.size() > 3000) textSweep();
+  if (textCache_.size() > 3000) textCache_.clear();  // pathological churn: start again rather than grow
+  return textCache_[key] = std::move(e);
+}
+void Ui::textSweep() {
+  for (auto it = textCache_.begin(); it != textCache_.end();) it = frameNo_ - it->second.seen > 90 ? textCache_.erase(it) : std::next(it);
+}
+IDWriteInlineObject* Ui::ellipsisFor(float size, int weight, bool mono) {
+  uint64_t key = (uint64_t(std::lround(size * 100)) << 16) ^ (uint64_t(weight) << 1) ^ (mono ? 1 : 0);
+  auto it = ellipsis_.find(key);
+  if (it != ellipsis_.end()) return it->second.get();
+  Com<IDWriteInlineObject> ell;
+  g->dw->CreateEllipsisTrimmingSign(g->format(size, weight, mono), ell.put());
+  ellipsis_[key] = ell;
+  return ell.get();
+}
+
 float Ui::textW(const string& t, float size, int weight, bool mono) {
   if (t.empty()) return 0;
-  auto L = mkLayout(t, size, weight, mono);
-  if (!L) return 0;
+  uint64_t key = textKey(2, t, size, weight, mono, 0, 0, 0);
+  if (TextEntry* e = textLookup(key)) return e->w;
+  TextEntry e;
+  e.L = mkLayout(t, size, weight, mono);
+  if (!e.L) return 0;
   DWRITE_TEXT_METRICS m;
-  L->GetMetrics(&m);
-  return m.widthIncludingTrailingWhitespace;
+  e.L->GetMetrics(&m);
+  e.w = m.widthIncludingTrailingWhitespace;
+  e.h = m.height;
+  return textStore(key, std::move(e)).w;
 }
 void Ui::text(const Rect& r, const string& t, float size, const Color& col, Align al, int weight, bool mono) {
   if (t.empty()) return;
-  auto L = mkLayout(t, size, weight, mono, std::max(1.f, r.w));
-  if (!L) return;
-  L->SetTextAlignment(al == AL_CENTER ? DWRITE_TEXT_ALIGNMENT_CENTER : (al == AL_RIGHT ? DWRITE_TEXT_ALIGNMENT_TRAILING : DWRITE_TEXT_ALIGNMENT_LEADING));
-  L->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-  L->SetMaxHeight(std::max(1.f, r.h));
-  DWRITE_TRIMMING tr{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
-  Com<IDWriteInlineObject> ell;
-  g->dw->CreateEllipsisTrimmingSign(g->format(size, weight, mono), ell.put());
-  L->SetTrimming(&tr, ell.get());
-  dc()->DrawTextLayout(D2D1::Point2F(r.x, r.y), L.get(), g->br(col), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+  float bw = std::max(1.f, r.w), bh = std::max(1.f, r.h);
+  uint64_t key = textKey(1, t, size, weight, mono, bw, bh, int(al));
+  TextEntry* e = textLookup(key);
+  if (!e) {
+    TextEntry n;
+    n.L = mkLayout(t, size, weight, mono, bw);
+    if (!n.L) return;
+    n.L->SetTextAlignment(al == AL_CENTER ? DWRITE_TEXT_ALIGNMENT_CENTER : (al == AL_RIGHT ? DWRITE_TEXT_ALIGNMENT_TRAILING : DWRITE_TEXT_ALIGNMENT_LEADING));
+    n.L->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    n.L->SetMaxHeight(bh);
+    DWRITE_TRIMMING tr{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+    n.L->SetTrimming(&tr, ellipsisFor(size, weight, mono));
+    e = &textStore(key, std::move(n));
+  }
+  dc()->DrawTextLayout(D2D1::Point2F(r.x, r.y), e->L.get(), g->br(col), D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 float Ui::textWrap(const Rect& r, const string& t, float size, const Color& col, int weight, bool draw) {
   if (t.empty()) return 0;
-  std::wstring w = widen(t);
-  Com<IDWriteTextLayout> L;
-  Com<IDWriteTextFormat> f;
-  g->dw->CreateTextFormat(widen(g->uiFamily).c_str(), nullptr, DWRITE_FONT_WEIGHT(weight), DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, L"en-us", f.put());
-  if (!f) return 0;
-  f->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
-  g->dw->CreateTextLayout(w.c_str(), UINT32(w.size()), f.get(), std::max(10.f, r.w), 100000, L.put());
-  if (!L) return 0;
-  DWRITE_TEXT_METRICS m;
-  L->GetMetrics(&m);
-  if (draw) dc()->DrawTextLayout(D2D1::Point2F(r.x, r.y), L.get(), g->br(col));
-  return m.height;
+  float bw = std::max(10.f, r.w);
+  uint64_t key = textKey(3, t, size, weight, false, bw, 0, 0);
+  TextEntry* e = textLookup(key);
+  if (!e) {
+    TextEntry n;
+    std::wstring w = widen(t);
+    IDWriteTextFormat* f = g->format(size, weight, false, false, true);
+    if (!f) return 0;
+    g->dw->CreateTextLayout(w.c_str(), UINT32(w.size()), f, bw, 100000, n.L.put());
+    if (!n.L) return 0;
+    DWRITE_TEXT_METRICS m;
+    n.L->GetMetrics(&m);
+    n.w = m.widthIncludingTrailingWhitespace;
+    n.h = m.height;
+    e = &textStore(key, std::move(n));
+  }
+  if (draw) dc()->DrawTextLayout(D2D1::Point2F(r.x, r.y), e->L.get(), g->br(col));
+  return e->h;
 }
 
 
@@ -285,38 +392,54 @@ std::wstring richParse(const string& md, vector<RichRun>& runs) {
 
 float Ui::richText(const Rect& r, const string& md, float size, const Color& col, int weight, bool draw, float lineSpacing) {
   if (md.empty()) return 0;
-  vector<RichRun> runs;
-  std::wstring w = richParse(md, runs);
-  Com<IDWriteTextFormat> f;
-  g->dw->CreateTextFormat(widen(g->uiFamily).c_str(), nullptr, DWRITE_FONT_WEIGHT(weight), DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, L"en-us", f.put());
-  if (!f) return 0;
-  f->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
-  f->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, size * lineSpacing, size * lineSpacing * 0.8f);
-  Com<IDWriteTextLayout> L;
-  g->dw->CreateTextLayout(w.c_str(), UINT32(w.size()), f.get(), std::max(10.f, r.w), 100000, L.put());
-  if (!L) return 0;
-  for (auto& ru : runs) {
-    DWRITE_TEXT_RANGE tr{ru.a, ru.n};
-    if (ru.kind == 1) L->SetFontWeight(DWRITE_FONT_WEIGHT(std::max(600, weight + 200)), tr);
-    else if (ru.kind == 2) L->SetFontStyle(DWRITE_FONT_STYLE_ITALIC, tr);
-    else if (ru.kind == 3) { L->SetFontFamilyName(L"Consolas", tr); L->SetFontSize(size * 0.92f, tr); }
-  }
-  DWRITE_TEXT_METRICS m;
-  L->GetMetrics(&m);
-  if (draw) {
-    // code spans get a subtle background
+  float bw = std::max(10.f, r.w);
+  uint64_t key = textKey(4, md, size, weight, false, bw, 0, int(std::lround(lineSpacing * 100)));
+  TextEntry* e = textLookup(key);
+  if (!e) {
+    TextEntry n;
+    vector<RichRun> runs;
+    std::wstring w = richParse(md, runs);
+    Com<IDWriteTextFormat> f;
+    g->dw->CreateTextFormat(widen(g->uiFamily).c_str(), nullptr, DWRITE_FONT_WEIGHT(weight), DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, L"en-us", f.put());
+    if (!f) return 0;
+    f->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+    f->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, size * lineSpacing, size * lineSpacing * 0.8f);
+    g->dw->CreateTextLayout(w.c_str(), UINT32(w.size()), f.get(), bw, 100000, n.L.put());
+    if (!n.L) return 0;
+    for (auto& ru : runs) {
+      DWRITE_TEXT_RANGE tr{ru.a, ru.n};
+      if (ru.kind == 1) n.L->SetFontWeight(DWRITE_FONT_WEIGHT(std::max(600, weight + 200)), tr);
+      else if (ru.kind == 2) n.L->SetFontStyle(DWRITE_FONT_STYLE_ITALIC, tr);
+      else if (ru.kind == 3) { n.L->SetFontFamilyName(L"Consolas", tr); n.L->SetFontSize(size * 0.92f, tr); }
+    }
+    DWRITE_TEXT_METRICS m;
+    n.L->GetMetrics(&m);
+    n.w = m.widthIncludingTrailingWhitespace;
+    n.h = m.height;
+    // code spans get a subtle background: their boxes are part of the cached entry
     for (auto& ru : runs) {
       if (ru.kind != 3 || ru.n == 0) continue;
       UINT32 cnt = 0;
-      L->HitTestTextRange(ru.a, ru.n, 0, 0, nullptr, 0, &cnt);
+      n.L->HitTestTextRange(ru.a, ru.n, 0, 0, nullptr, 0, &cnt);
       if (!cnt) continue;
       vector<DWRITE_HIT_TEST_METRICS> hm(cnt);
-      if (SUCCEEDED(L->HitTestTextRange(ru.a, ru.n, 0, 0, hm.data(), cnt, &cnt)))
-        for (auto& h : hm) fill({r.x + h.left - 2 * s, r.y + h.top + 1 * s, h.width + 4 * s, h.height - 1 * s}, c.text.withA(dark ? 0.1f : 0.06f), 3 * s);
+      if (SUCCEEDED(n.L->HitTestTextRange(ru.a, ru.n, 0, 0, hm.data(), cnt, &cnt)))
+        for (auto& h : hm) n.boxes.push_back({h.left, h.top, h.width, h.height});
     }
-    dc()->DrawTextLayout(D2D1::Point2F(r.x, r.y), L.get(), g->br(col));
+    e = &textStore(key, std::move(n));
   }
-  return m.height;
+  if (draw) {
+    for (auto& b : e->boxes) fill({r.x + b[0] - 2 * s, r.y + b[1] + 1 * s, b[2] + 4 * s, b[3] - 1 * s}, c.text.withA(dark ? 0.1f : 0.06f), 3 * s);
+    dc()->DrawTextLayout(D2D1::Point2F(r.x, r.y), e->L.get(), g->br(col));
+  }
+  return e->h;
+}
+
+float Ui::scrollGet(const string& key) const {
+  uint64_t h = 1469598103934665603ull;
+  for (unsigned char ch : "scroll:" + key) { h ^= ch; h *= 1099511628211ull; }
+  auto it = scroll_.find(h);
+  return it == scroll_.end() ? 0.f : it->second.first;
 }
 
 void Ui::scrollSet(const string& key, float y) {
@@ -344,8 +467,9 @@ static int u32Index(const std::u32string& s, UINT32 pos16) {
 
 bool Ui::textArea(const Rect& r, const string& key, string& buf, const string& placeholder, bool* submitted, float* contentH, float fontSize) {
   uint64_t idv = id("ta:" + key);
+  recordHover(idv, r);
   if (scrollStack_.empty()) hitRects_.push_back(r);
-  bool hov = mouseIn(r);
+  bool hov = touchHit(idv, r);
   if (hov) { hotNext_ = idv; cursor = "ibeam"; }
   bool changed = false;
   float fs = fontSize * s, pad = 10 * s;
@@ -368,7 +492,7 @@ bool Ui::textArea(const Rect& r, const string& key, string& buf, const string& p
     L->HitTestPoint(mx - tr.x, my - tr.y + (foc ? sy : 0), &trail, &inside, &hm);
     return u32Index(ebuf_, hm.textPosition + (trail ? hm.length : 0));
   };
-  if (in.pressed[0]) {
+  if (in.pressed[0] && !in.touchCancel) {
     if (hov) {
       if (focus != idv) { focus = idv; ebuf_ = toU32(buf); sy = 0; foc = true; }
       auto L = layoutOf(ebuf_);
@@ -471,6 +595,15 @@ bool Ui::textArea(const Rect& r, const string& key, string& buf, const string& p
 static const std::map<string, const char*>& iconPaths() {
   static const std::map<string, const char*> P = {
       {"folder", "M3 7 L3 18 C3 19 4 20 5 20 L19 20 C20 20 21 19 21 18 L21 9 C21 8 20 7 19 7 L12 7 L10 4 L5 4 C4 4 3 5 3 6 Z"},
+      {"list", "M9 6 L20 6 M9 12 L20 12 M9 18 L20 18 O 4.5 6 1.3 O 4.5 12 1.3 O 4.5 18 1.3"},
+      {"font", "M4 19 L11 4 L18 19 M6.6 13.5 L15.4 13.5 M20 10 L20 19"},
+      {"textcolor", "M6 15 L11 4 L16 15 M8 11 L14 11 M4 20 L20 20"},
+      {"spacing", "M7 4 L7 20 M4.5 6.5 L7 4 L9.5 6.5 M4.5 17.5 L7 20 L9.5 17.5 M13 6 L21 6 M13 12 L21 12 M13 18 L21 18"},
+      {"caption", "R 4 3.5 16 11 1.5 M7 18.5 L17 18.5 M9 21 L15 21"},
+      {"sliders", "M4 7 L20 7 M4 12 L20 12 M4 17 L20 17 O 9 7 2 O 15 12 2 O 8 17 2"},
+      {"newdoc", "M6 3 L14 3 L19 8 L19 21 L6 21 Z M14 3 L14 8 L19 8 M9.5 15 L15.5 15 M12.5 12 L12.5 18"},
+      {"pages", "R 7 3 12 15 1.5 M7 7 L4 7 L4 21 L15 21 L15 18"},
+      {"palette", "O 12 12 9 O 8.5 10 1.2 O 12 7.5 1.2 O 15.5 10 1.2 M12 21 C9.5 21 9.8 17.5 12.6 17.2 C15 17 15.8 15 15.8 15 L21 15"},
       {"save", "R 4 4 16 16 2 M8 4 L8 9 L15 9 L15 4 M8 20 L8 14 L16 14 L16 20"},
       {"data", "M4 6 C4 3.5 20 3.5 20 6 C20 8.5 4 8.5 4 6 Z M4 6 L4 18 C4 20.5 20 20.5 20 18 L20 6 M4 12 C4 14.5 20 14.5 20 12"},
       {"network", "O 6 6 2.6 O 18 7 2.6 O 12 18 2.6 O 19 17 1.6 M8.6 6.2 L15.4 6.8 M7.3 8.3 L10.8 15.7 M16.8 9.3 L13.3 15.7 M14.6 18 L17.4 17.2"},
@@ -488,6 +621,7 @@ static const std::map<string, const char*>& iconPaths() {
       {"win-close", "M7 7 L17 17 M17 7 L7 17"},
       {"agent", "M4.5 6 L11 6 M4.5 12 L13 12 M4.5 18 L9 18 M16.5 13 L17.6 16.4 L21 17.5 L17.6 18.6 L16.5 22 L15.4 18.6 L12 17.5 L15.4 16.4 Z"},
       {"text", "M6 6.5 L18 6.5 M12 6.5 L12 19"},
+      {"pen", "M4 20 L9 19 L19.5 8.5 C21 7 17 3 15.5 4.5 L5 15 Z M13.5 6.5 L17.5 10.5"},
       {"undo", "M9 14 L4 9 L9 4 M4 9 L15 9 C18.5 9 21 11.5 21 15 C21 18.5 18.5 21 15 21 L11 21"},
       {"redo", "M15 14 L20 9 L15 4 M20 9 L9 9 C5.5 9 3 11.5 3 15 C3 18.5 5.5 21 9 21 L13 21"},
       {"fit", "M4 9 L4 4 L9 4 M15 4 L20 4 L20 9 M20 15 L20 20 L15 20 M9 20 L4 20 L4 15"},
@@ -505,6 +639,7 @@ static const std::map<string, const char*>& iconPaths() {
       {"eye", "M2 12 C5 5.5 19 5.5 22 12 C19 18.5 5 18.5 2 12 Z O 12 12 3"},
       {"eye-off", "M2 12 C5 5.5 19 5.5 22 12 C19 18.5 5 18.5 2 12 Z O 12 12 3 M3 3 L21 21"},
       {"pin", "M12 17 L12 22 M8 3 L16 3 M9 3 L9 10 L6 14 L18 14 L15 10 L15 3"},
+      {"bookmark", "M6 3 L18 3 L18 21 L12 17 L6 21 Z"},
       {"info", "O 12 12 9 M12 11 L12 16.5 M12 7.6 L12 7.9"},
       {"warn", "M12 3.5 L21.5 20 L2.5 20 Z M12 9.5 L12 14 M12 16.8 L12 17.1"},
       {"sun", "O 12 12 4 M12 2 L12 4 M12 20 L12 22 M2 12 L4 12 M20 12 L22 12 M4.9 4.9 L6.3 6.3 M17.7 17.7 L19.1 19.1 M4.9 19.1 L6.3 17.7 M17.7 6.3 L19.1 4.9"},
@@ -515,6 +650,12 @@ static const std::map<string, const char*>& iconPaths() {
       {"layers", "M12 3 L21 8 L12 13 L3 8 Z M3 12.5 L12 17.5 L21 12.5 M3 16.5 L12 21.5 L21 16.5"},
       {"cube", "M12 2.5 L20.5 7 L20.5 17 L12 21.5 L3.5 17 L3.5 7 Z M3.5 7 L12 11.5 L20.5 7 M12 11.5 L12 21.5"},
       {"sparkle", "M12 3 L13.8 10.2 L21 12 L13.8 13.8 L12 21 L10.2 13.8 L3 12 L10.2 10.2 Z"},
+      {"mic", "R 9 2.5 6 12 3 M6 11 C6 15.4 8.7 18 12 18 C15.3 18 18 15.4 18 11 M12 18 L12 21.5 M8.5 21.5 L15.5 21.5"},
+      {"live", "O 12 12 2.4 M8.2 8.2 C6.1 10.3 6.1 13.7 8.2 15.8 M15.8 8.2 C17.9 10.3 17.9 13.7 15.8 15.8 M5.4 5.4 C1.8 9 1.8 15 5.4 18.6 M18.6 5.4 C22.2 9 22.2 15 18.6 18.6"},
+      {"shield", "M12 3 L19 6 L19 11.5 C19 16 16 19.5 12 21 C8 19.5 5 16 5 11.5 L5 6 Z M9 12 L11 14 L15 10"},
+      {"orb", "O 12 12 3.5 M4.5 12 C4.5 7.9 7.9 4.5 12 4.5 M19.5 12 C19.5 16.1 16.1 19.5 12 19.5"},
+      {"expand", "M14 10 L20 4 M15 4 L20 4 L20 9 M10 14 L4 20 M9 20 L4 20 L4 15"},
+      {"camera", "M4 8 C4 7 5 6 6 6 L8.5 6 L10 3.5 L14 3.5 L15.5 6 L18 6 C19 6 20 7 20 8 L20 18 C20 19 19 20 18 20 L6 20 C5 20 4 19 4 18 Z O 12 13 3.5"},
       {"settings", "O 12 12 3 O 12 12 7.5 M12 2 L12 4.5 M12 19.5 L12 22 M2 12 L4.5 12 M19.5 12 L22 12 M4.9 4.9 L6.7 6.7 M17.3 17.3 L19.1 19.1 M4.9 19.1 L6.7 17.3 M17.3 6.7 L19.1 4.9"},
       {"grid", "R 3.5 3.5 7 7 1.2 R 13.5 3.5 7 7 1.2 R 3.5 13.5 7 7 1.2 R 13.5 13.5 7 7 1.2"},
       {"table", "R 3 4 18 16 2 M3 10 L21 10 M3 15 L21 15 M10 4 L10 20"},
@@ -541,11 +682,38 @@ static const std::map<string, const char*>& iconPaths() {
       {"cursor", "M5 3 L19 12 L12 13.5 L9 20 Z"},
       {"hand", "M8 13 L8 5.5 C8 4 10 4 10 5.5 L10 11 M10 10 L10 3.8 C10 2.4 12 2.4 12 3.8 L12 11 M12 10 L12 4.8 C12 3.3 14 3.3 14 4.8 L14 11 M14 10 L14 6.8 C14 5.3 16 5.3 16 6.8 L16 15 C16 19 14 21 11 21 C8 21 7 19 5.5 16.5 L4 14 C3.3 12.8 5 11.8 6 13 L8 15"},
       {"lasso", "R 4 4 16 16 1.5"},
+      {"area", "M4 8 L4 4 L8 4 M16 4 L20 4 L20 8 M20 16 L20 20 L16 20 M8 20 L4 20 L4 16 R 8.5 8.5 7 7 1"},
+      // reader (1.19): two facing pages, a turn, a printer
+      {"twopage", "R 3 5 8 14 1 R 13 5 8 14 1 M6 9 L8 9 M6 12 L8 12 M16 9 L18 9 M16 12 L18 12"},
+      {"rotate", "M19.5 12 C19.5 16.1 16.1 19.5 12 19.5 C7.9 19.5 4.5 16.1 4.5 12 C4.5 7.9 7.9 4.5 12 4.5 C14.6 4.5 16.9 5.8 18.2 7.8 M18.6 3.5 L18.6 8.2 L13.9 8.2"},
+      {"print", "M7 8.5 L7 3.5 L17 3.5 L17 8.5 M7 17 L4 17 L4 10.5 C4 9.4 4.9 8.5 6 8.5 L18 8.5 C19.1 8.5 20 9.4 20 10.5 L20 17 L17 17 M7 13.5 L17 13.5 L17 20.5 L7 20.5 Z"},
       {"external", "M14 4 L20 4 L20 10 M20 4 L11 13 M18 14 L18 19 C18 19.6 17.6 20 17 20 L5 20 C4.4 20 4 19.6 4 19 L4 7 C4 6.4 4.4 6 5 6 L10 6"},
       {"arrow-left", "M19 12 L5 12 M11 6 L5 12 L11 18"},
       {"quote", "M5 11 L9 11 L9 17 L5 17 Z M5 11 C5 8 6.5 6.5 9 6 M14 11 L18 11 L18 17 L14 17 Z M14 11 C14 8 15.5 6.5 18 6"},
       {"history", "M3.5 12 C3.5 7 7.5 3.5 12 3.5 C16.7 3.5 20.5 7.3 20.5 12 C20.5 16.7 16.7 20.5 12 20.5 C8.8 20.5 6 18.8 4.6 16.2 M3.5 5.5 L3.5 12 L9.5 12 M12 7.5 L12 12 L15 14"},
       {"map", "M3 6 L9 3.5 L15 6 L21 3.5 L21 18 L15 20.5 L9 18 L3 20.5 Z M9 3.5 L9 18 M15 6 L15 20.5"},
+      // writer (1.11)
+      {"writer", "M5 3 L14 3 L19 8 L19 21 L5 21 Z M14 3 L14 8 L19 8 M8 12 L16 12 M8 15.5 L16 15.5 M8 19 L13 19"},
+      {"bold", "M7 4 L13 4 C16 4 18 5.5 18 8 C18 10.5 16 12 13 12 L7 12 M7 12 L14 12 C17 12 19 13.5 19 16 C19 18.5 17 20 14 20 L7 20 Z"},
+      {"italic", "M13 4 L19 4 M5 20 L11 20 M15 4 L9 20"},
+      {"underline", "M6 4 L6 11 C6 14.5 8.5 17 12 17 C15.5 17 18 14.5 18 11 L18 4 M5 21 L19 21"},
+      {"strike", "M4 12 L20 12 M8 7.5 C8 5.5 10 4 12 4 C14 4 16 5 16 7 M8 17 C8 19 10 20 12 20 C14 20 16 19 16 17"},
+      {"sub", "M4 6 L11 14 M11 6 L4 14 M15 13 C15 12 16 11.5 17 11.5 C18.5 11.5 19.5 12.5 19 14 L15 19 L19.5 19"},
+      {"sup", "M4 10 L11 18 M11 10 L4 18 M15 5 C15 4 16 3.5 17 3.5 C18.5 3.5 19.5 4.5 19 6 L15 11 L19.5 11"},
+      {"code", "M8 6 L3 12 L8 18 M16 6 L21 12 L16 18 M14 4 L10 20"},
+      {"mark", "M6 15 L14.5 6.5 L18.5 10.5 L10 19 L6 19 Z M6 19 L4 21 M4 22 L20 22"},
+      {"clearfmt", "M5 4 L18 4 M11.5 4 L8 17 M14 15 L20 21 M20 15 L14 21"},
+      {"alignleft", "M4 6 L20 6 M4 10 L14 10 M4 14 L20 14 M4 18 L14 18"},
+      {"aligncenter", "M4 6 L20 6 M7 10 L17 10 M4 14 L20 14 M7 18 L17 18"},
+      {"alignright", "M4 6 L20 6 M10 10 L20 10 M4 14 L20 14 M10 18 L20 18"},
+      {"justify", "M4 6 L20 6 M4 10 L20 10 M4 14 L20 14 M4 18 L20 18"},
+      {"listbullet", "M9 6 L20 6 M9 12 L20 12 M9 18 L20 18 O 5 6 1.3 O 5 12 1.3 O 5 18 1.3"},
+      {"listnum", "M10 6 L20 6 M10 12 L20 12 M10 18 L20 18 M4 4.5 L5.5 3.5 L5.5 8.5 M4 11 C4 10 5 9.5 5.8 9.5 C7 9.5 7.2 10.7 6.5 11.5 L4 14 L7.2 14 M4 16.5 L7 16.5 L5.5 18.5 C7 18.5 7.5 19.5 7 20.3 C6.5 21 4.5 21 4 20.3"},
+      {"indent", "M10 6 L20 6 M10 12 L20 12 M10 18 L20 18 M4 6 L4 18 M3 9 L7 12 L3 15"},
+      {"outdent", "M10 6 L20 6 M10 12 L20 12 M10 18 L20 18 M4 6 L4 18 M7 9 L3 12 L7 15"},
+      {"image", "M4 5 L20 5 L20 19 L4 19 Z M4 16 L9 11 L13 15 L16 12 L20 16 O 15.5 8.5 1.5"},
+      {"pagebreak", "M4 4 L4 9 L20 9 L20 4 M4 20 L4 15 L20 15 L20 20 M3 12 L6 12 M9 12 L12 12 M15 12 L18 12 M21 12 L21.5 12"},
+      {"toc", "M4 5 L9 5 M12 5 L20 5 M6 10 L9 10 M12 10 L20 10 M6 15 L9 15 M12 15 L20 15 M4 20 L9 20 M12 20 L20 20"},
   };
   return P;
 }
@@ -637,23 +805,63 @@ uint64_t Ui::id(const string& str) const {
 }
 void Ui::pushId(const string& str) { idStack_.push_back(id(str)); }
 void Ui::popId() { if (!idStack_.empty()) idStack_.pop_back(); }
+void Ui::focusText(uint64_t idv, const string& current) {
+  focus = idv;
+  ebuf_ = toU32(current);
+  caret_ = anchor_ = int(ebuf_.size());
+  escroll_ = 0;
+  mouseSel_ = false;
+}
 
 bool Ui::mouseIn(const Rect& r) const {
   if (!r.has(in.mx, in.my)) return false;
   if (modal_ && !modalLayer_) return false;  // a dialog is open: everything beneath is inert
   if (!clips_.empty() && !clips_.back().has(in.mx, in.my)) return false;
   if (!inOverlay_ && popupRectPrev_.w > 0 && popupRectPrev_.has(in.mx, in.my)) return false;
+  if (blocked(in.mx, in.my)) return false;
   return true;
+}
+
+bool Ui::touchHit(uint64_t idv, const Rect& r) const {
+  if (!in.touch) return mouseIn(r);
+
+  // The prior frame's z-ordered hit map is sampled once in beginFrame. Honor it so enlarged controls never steal a
+  // tap from a neighbour; overlay widgets update this cached target as they are drawn above the base layer.
+  if (touchTargetId_) return touchTargetId_ == idv && mouseIn(r);
+
+  // Keep small icon controls tappable at roughly 44 logical pixels, while retaining their actual visual geometry.
+  const float padX = std::max(0.f, 22 * s - r.w * 0.5f);
+  const float padY = std::max(0.f, 22 * s - r.h * 0.5f);
+  return mouseIn({r.x - padX, r.y - padY, r.w + 2 * padX, r.h + 2 * padY});
+}
+
+void Ui::recordHover(uint64_t idv, const Rect& r) {
+  hoverHits_.push_back({idv, r, clips_.empty() ? Rect{} : clips_.back(), !clips_.empty(), inOverlay_, modalLayer_});
+  if (in.touch && inOverlay_ && r.has(in.mx, in.my) && (clips_.empty() || clips_.back().has(in.mx, in.my))) touchTargetId_ = idv;
+}
+
+uint64_t Ui::hoverTargetAt(float x, float y) const {
+  const bool inPopup = popupRectNext_.w > 0 && popupRectNext_.has(x, y);
+  const bool inBlocked = blockRect_.w > 0 && blockRect_.has(x, y);
+  for (auto it = hoverHits_.rbegin(); it != hoverHits_.rend(); ++it) {
+    if (modal_ && !it->modal) continue;
+    if (inPopup && !it->overlay) continue;
+    if (inBlocked && !it->overlay) continue;
+    if (it->clipped && !it->clip.has(x, y)) continue;
+    if (it->r.has(x, y)) return it->id;
+  }
+  return 0;
 }
 
 bool Ui::behave(uint64_t idv, const Rect& r, bool* hovered, bool* held) {
   lastId_ = idv;
+  recordHover(idv, r);
   if (scrollStack_.empty()) hitRects_.push_back(r);
-  bool over = mouseIn(r) && (active == 0 || active == idv);
+  bool over = touchHit(idv, r) && (active == 0 || active == idv);
   if (over) hotNext_ = idv;
-  if (over && in.pressed[0]) active = idv;
+  if (over && in.pressed[0] && !in.touchCancel) active = idv;
   bool clicked = false;
-  if (active == idv && in.released[0]) { clicked = mouseIn(r); }
+  if (active == idv && in.released[0] && !in.touchCancel) { clicked = touchHit(idv, r); }
   if (hovered) *hovered = over;
   if (held) *held = active == idv && in.down[0];
   if (over) cursor = "hand";
@@ -704,7 +912,9 @@ bool Ui::iconButton(const Rect& r, const string& ic, const string& tooltip, bool
 bool Ui::help(float x, float cy, const string& msg) {
   float r = 7 * s;
   Rect hr{x - 2 * s, cy - r - 2 * s, 2 * r + 4 * s, 2 * r + 4 * s};
-  bool hov = mouseIn(hr) && !in.down[0];
+  uint64_t hid = id("help:" + msg + ":" + std::to_string(int(x)) + ":" + std::to_string(int(cy)));
+  recordHover(hid, hr);
+  bool hov = touchHit(hid, hr) && !in.down[0];
   Color col = hov ? c.accent : c.textFaint.withA(0.85f);
   circle(x + r, cy, r - 1.f * s, col, false, 1.f * s);
   text({x, cy - r, 2 * r, 2 * r}, "?", 9.5f * s, col, AL_CENTER, 600);
@@ -870,10 +1080,11 @@ bool Ui::combo(const Rect& r, const string& key, const vector<string>& opts, int
 
 bool Ui::textInput(const Rect& r, const string& key, string& buf, const string& placeholder, bool* submitted, const string& ic) {
   uint64_t idv = id("ti:" + key);
+  recordHover(idv, r);
   if (scrollStack_.empty()) hitRects_.push_back(r);
   bool mask = maskNext;
   maskNext = false;
-  bool hov = mouseIn(r);
+  bool hov = touchHit(idv, r);
   if (hov) { hotNext_ = idv; cursor = "ibeam"; }
   bool changed = false;
   float padL = (ic.empty() ? 9 : 30) * s;
@@ -1116,7 +1327,31 @@ void Ui::endScroll(float contentH) {
   auto& st = scroll_[sc.id];
   st.second = contentH;
   float maxY = std::max(0.f, contentH - sc.r.h);
-  bool over = sc.r.has(in.mx, in.my) && !(modal_ && !modalLayer_) && (inOverlay_ || !(popupRectPrev_.w > 0 && popupRectPrev_.has(in.mx, in.my)));
+  bool over = sc.r.has(in.mx, in.my) && !(modal_ && !modalLayer_) && (inOverlay_ || !(popupRectPrev_.w > 0 && popupRectPrev_.has(in.mx, in.my))) && !blocked(in.mx, in.my);
+  if (!touchScrollId_ && in.touch && in.pressed[0] && over && maxY > 0) {
+    touchScrollId_ = sc.id;
+    touchScrollStartY_ = touchScrollLastY_ = in.my;
+    touchScrollMoved_ = false;
+  }
+  if (touchScrollId_ == sc.id) {
+    if (in.touchCancel) {
+      touchScrollId_ = 0;
+      touchScrollMoved_ = false;
+    } else if (in.touch && in.down[0]) {
+      if (!touchScrollMoved_ && std::fabs(in.my - touchScrollStartY_) >= 8 * s) {
+        touchScrollMoved_ = true;
+        active = 0;  // cancel a row/button press that became a pan gesture
+      }
+      if (touchScrollMoved_ && maxY > 0) {
+        st.first = clampv(st.first - (in.my - touchScrollLastY_), 0.f, maxY);
+        scrollTarget_.erase(sc.id);
+      }
+      touchScrollLastY_ = in.my;
+    } else if (in.touch && in.released[0] && !in.down[0]) {
+      touchScrollId_ = 0;
+      touchScrollMoved_ = false;
+    }
+  }
   if (over && wheelLeft_ != 0 && maxY > 0) {
     float tgt = scrollTarget_.count(sc.id) ? scrollTarget_[sc.id] : st.first;
     scrollTarget_[sc.id] = clampv(tgt - wheelLeft_ * 64 * s, 0.f, maxY);

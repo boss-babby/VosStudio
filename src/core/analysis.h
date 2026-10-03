@@ -136,8 +136,18 @@ struct VariantGroup {
   bool ai = false;             // proposed by the AI (Data → Clean terms → AI)
   bool ignore = false;         // generic term: remove target from maps instead of merging
   string note;                 // the AI's short reason
+  double score = 0;            // confidence 0..1: rule certainty (hyphen 0.98 … typo 0.5), author evidence, or the AI's own estimate
+  string evidence;             // what the suggestion rests on ("ORCID 0000-…", "same initials, 2 shared affiliations")
 };
 vector<VariantGroup> findVariants(const Corpus& c, Unit unit, const Thesaurus& th);
+// Author name disambiguation: labels of the same person are grouped from author identifiers (ORCID, ResearcherID,
+// Scopus and OpenAlex ids), then from compatible initials backed by shared affiliations, countries or co-authors.
+// Conflicting identifiers never merge. Results are ranked by confidence; only identifier matches are marked safe.
+vector<VariantGroup> findAuthorVariants(const Corpus& c);
+// "long form (ABBR)" patterns in titles and abstracts: lower-case abbreviation -> most frequent long form
+std::map<string, string> acronymDictionary(const Corpus& c);
+double variantScore(const string& reason);
+void rankVariants(vector<VariantGroup>& v);
 // labels of a field with their occurrences after the thesaurus (most frequent first); "" keys (ignored) are left out
 vector<std::pair<string, int>> termCounts(const Corpus& c, Unit unit, const Thesaurus& th);
 string thesaurusKey(Unit unit, const string& label);  // key used by the thesaurus for this unit

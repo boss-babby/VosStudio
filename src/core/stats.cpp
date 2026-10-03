@@ -475,13 +475,13 @@ string methodsParagraph(const Corpus& c, const AnaSpec& spec, const Network& net
        (co.minSize > 1 ? ", merging clusters smaller than " + std::to_string(co.minSize) + " items" : string("")) + ", giving " + std::to_string(net.nClusters) +
        " clusters (modularity Q = " + fmtFixed(net.quality, 3) + ").";
   if (bundled) o += " Links were drawn with force-directed edge bundling (Holten & van Wijk, 2009).";
-  o += " The analysis was performed with VOSStudio Native.";
-  o += "\n\nReferences\n"
+  o += " The analysis was performed with VOSStudio Native " + appVersion() + " (VOSStudio Native, " + currentYear() + ").";
+  o += string("\n\nReferences\n"
        "Holten, D., & van Wijk, J. J. (2009). Force-directed edge bundling for graph visualization. Computer Graphics Forum, 28(3), 983\xE2\x80\x93" "990.\n"
        "Traag, V. A., Waltman, L., & van Eck, N. J. (2019). From Louvain to Leiden: guaranteeing well-connected communities. Scientific Reports, 9, 5233.\n"
        "van Eck, N. J., & Waltman, L. (2009). How to normalize cooccurrence data? Journal of the American Society for Information Science and Technology, 60(8), 1635\xE2\x80\x93" "1651.\n"
        "van Eck, N. J., Waltman, L., Dekker, R., & van den Berg, J. (2010). A comparison of two techniques for bibliometric mapping: Multidimensional scaling and VOS. Journal of the American Society for Information Science and Technology, 61(12), 2405\xE2\x80\x93" "2416.\n"
-       "Waltman, L., van Eck, N. J., & Noyons, E. C. M. (2010). A unified approach to mapping and clustering of bibliometric networks. Journal of Informetrics, 4(4), 629\xE2\x80\x93" "635.";
+       "Waltman, L., van Eck, N. J., & Noyons, E. C. M. (2010). A unified approach to mapping and clustering of bibliometric networks. Journal of Informetrics, 4(4), 629\xE2\x80\x93" "635.\n") + softwareReference(false);
   if (!bundled) {
     size_t p = o.find("Holten, D.");
     size_t e = o.find('\n', p);

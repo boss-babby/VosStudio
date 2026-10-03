@@ -188,8 +188,8 @@ double toDouble(const string& s, double def) {
   return e == t.c_str() ? def : v;
 }
 // Paths are UTF-8. On Windows the narrow C runtime uses the ANSI code page, so convert to UTF-16 and use _wfopen.
-FILE* openFileUtf8(const string& path, bool write) {
 #ifdef _WIN32
+static std::wstring widePath(const string& path) {
   std::wstring w;
   for (size_t i = 0; i < path.size();) {
     unsigned char c = (unsigned char)path[i];
@@ -203,9 +203,48 @@ FILE* openFileUtf8(const string& path, bool write) {
     if (cp >= 0x10000) { cp -= 0x10000; w += wchar_t(0xD800 + (cp >> 10)); w += wchar_t(0xDC00 + (cp & 0x3FF)); }
     else w += wchar_t(cp);
   }
-  return _wfopen(w.c_str(), write ? L"wb" : L"rb");
+  return w;
+}
+#endif
+FILE* openFileUtf8(const string& path, bool write) {
+#ifdef _WIN32
+  return _wfopen(widePath(path).c_str(), write ? L"wb" : L"rb");
 #else
   return fopen(path.c_str(), write ? "wb" : "rb");
+#endif
+}
+bool fileExistsU(const string& path) {
+  FILE* f = openFileUtf8(path, false);
+  if (!f) return false;
+  fclose(f);
+  return true;
+}
+long long fileSizeU(const string& path) {
+  FILE* f = openFileUtf8(path, false);
+  if (!f) return -1;
+  long long n = -1;
+#ifdef _WIN32
+  if (_fseeki64(f, 0, SEEK_END) == 0) n = _ftelli64(f);
+#else
+  if (fseeko(f, 0, SEEK_END) == 0) n = (long long)ftello(f);
+#endif
+  fclose(f);
+  return n;
+}
+bool removeFileU(const string& path) {
+#ifdef _WIN32
+  return _wremove(widePath(path).c_str()) == 0;
+#else
+  return remove(path.c_str()) == 0;
+#endif
+}
+bool renameFileU(const string& from, const string& to) {
+#ifdef _WIN32
+  std::wstring wf = widePath(from), wt = widePath(to);
+  _wremove(wt.c_str());  // rename does not replace on Windows
+  return _wrename(wf.c_str(), wt.c_str()) == 0;
+#else
+  return rename(from.c_str(), to.c_str()) == 0;
 #endif
 }
 
@@ -398,9 +437,15 @@ string base64(const string& d) {
 }
 
 uint32_t crc32(const uint8_t* p, size_t n, uint32_t crc) {
-  static uint32_t tab[256];
-  static bool init = false;
-  if (!init) { for (uint32_t i = 0; i < 256; i++) { uint32_t c = i; for (int k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1; tab[i] = c; } init = true; }
+  static const std::array<uint32_t, 256> tab = [] {
+    std::array<uint32_t, 256> values{};
+    for (uint32_t i = 0; i < values.size(); i++) {
+      uint32_t c = i;
+      for (int k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+      values[i] = c;
+    }
+    return values;
+  }();  // thread-safe initialization: embedded PDFium and Tectonic resources can inflate concurrently
   crc = ~crc;
   for (size_t i = 0; i < n; i++) crc = tab[(crc ^ p[i]) & 255] ^ (crc >> 8);
   return ~crc;
@@ -531,5 +576,27 @@ string base64Decode(const string& b64) {
     if (bits >= 8) { bits -= 8; out += char((acc >> bits) & 0xFF); }
   }
   return out;
+}
+
+// ---- version and reference
+static string g_appVersion = "dev";
+void setAppVersion(const string& v) { g_appVersion = v; }
+const string& appVersion() { return g_appVersion; }
+string currentYear() {
+  std::time_t t = std::time(nullptr);
+  std::tm tmv{};
+#ifdef _WIN32
+  localtime_s(&tmv, &t);
+#else
+  localtime_r(&t, &tmv);
+#endif
+  return std::to_string(1900 + tmv.tm_year);
+}
+string softwareReference(bool bibtex) {
+  string year = currentYear();
+  if (bibtex)
+    return "@software{vosstudio_native_" + year + ",\n  title = {VOSStudio Native: bibliometric mapping and analysis},\n  version = {" + g_appVersion + "},\n  year = {" + year +
+           "},\n  note = {Windows application; VOS mapping, Leiden clustering, publication figures}\n}";
+  return "VOSStudio Native (Version " + g_appVersion + ") [Computer software]. (" + year + ").";
 }
 }  // namespace vs

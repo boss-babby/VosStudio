@@ -23,6 +23,10 @@ struct Prim {
   string text;
   float size = 8;
   bool bold = false;
+  bool italic = false, mono = false, underline = false;  // text: oblique face, Courier / monospace face, underlined (documents)
+  int8_t face = 0;   // text: 0 the scene's family (Scene::serif), 1 sans (Helvetica), 2 serif (Times) — documents mix them
+  string family;     // text: preferred family name for SVG / HTML ("Georgia"); PDF uses the face class
+  string href;                                           // text: link target (PDF link annotation, SVG <a>)
   int anchor = 0;  // 0 start, 1 middle, 2 end
   bool halo = false;
   Color haloC;
@@ -42,6 +46,7 @@ vector<SphereStop> sphereStops(const Color& base);  // stops from the focal poin
 
 struct Scene {
   double W = 0, H = 0;  // points
+  bool serif = false;   // documents: Times family instead of Helvetica in PDF/SVG
   vector<Prim> items;
   vector<string> warnings;
   int labels = 0, candidates = 0;
@@ -58,6 +63,7 @@ struct FigureSpec {
   bool legend = true, sizeLegend = true, colorbar = true, letters = true;
   bool transparent = false, serif = false, footer = false;
   bool pdfPages = false;  // PDF export: one page per panel instead of one page with all panels
+  bool hybridExport = false;  // SVG/PDF: embed raster artwork while keeping text native/editable
   int shading = 0;  // nodes: 0 = match the view (spheres unless the look uses flat nodes), 1 = flat, 2 = spheres
   string title, caption;
   double dpi = 300;

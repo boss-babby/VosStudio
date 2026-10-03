@@ -37,10 +37,25 @@ string niceDate(const string& iso) {
 // =====================================================================================
 void App::diffCompute() {
   if (!cmpA0) suggestPeriods(P->corpus, cmpA0, cmpA1, cmpB0, cmpB1);
-  bool same = pdiffValid && pdA0 == cmpA0 && pdA1 == cmpA1 && pdB0 == cmpB0 && pdB1 == cmpB1 && pdCorpusVer == P->corpusVersion && pdNet == &P->net && pdNetN == P->net.n();
+  bool same = pdiffValid && pdKind == cmpKind && pdA0 == cmpA0 && pdA1 == cmpA1 && pdB0 == cmpB0 && pdB1 == cmpB1 && pdFileA == cmpFileA && pdFileB == cmpFileB &&
+              pdCorpusVer == P->corpusVersion && pdNet == &P->net && pdNetN == P->net.n();
   if (same) return;
-  pdiff = periodDiff(P->net, P->corpus, cmpA0, cmpA1, cmpB0, cmpB1);
+  if (cmpKind == 2) {
+    pdiff = PeriodDiff();
+    pdiff.error = "Thresholds have no difference map: use Side by Side.";
+    pdTitleA.clear(); pdTitleB.clear();
+  } else {
+    vector<char> inA, inB;
+    string err;
+    if (!compareMasks(inA, inB, pdTitleA, pdTitleB, &err)) { pdiff = PeriodDiff(); pdiff.error = err; }
+    else {
+      pdiff = subsetDiff(P->net, P->corpus, inA, inB);
+      pdiff.a0 = cmpA0; pdiff.a1 = cmpA1; pdiff.b0 = cmpB0; pdiff.b1 = cmpB1;
+    }
+  }
+  pdKind = cmpKind;
   pdA0 = cmpA0; pdA1 = cmpA1; pdB0 = cmpB0; pdB1 = cmpB1;
+  pdFileA = cmpFileA; pdFileB = cmpFileB;
   pdCorpusVer = P->corpusVersion;
   pdNet = &P->net;
   pdNetN = P->net.n();
@@ -91,6 +106,7 @@ double App::diffScoreInto(Network& N) {
   double m = 1.5;
   if (!mag.empty()) { std::sort(mag.begin(), mag.end()); m = clampv(mag[size_t(0.95 * double(mag.size() - 1))], 1.0, 3.0); }
   N.scoreIdx = k;
+  invalidateFlags();  // node-score validity may change Timeline visibility without changing any vector storage
   return m;
 }
 
@@ -109,8 +125,10 @@ void App::diffClear() {
 void App::trendsDifference(Lay& L) {
   float s = ui.s;
   sectionTitle(L, "Difference map",
-               "Colours every item of the current map by how its share of documents changed from period A to period B. Red items grew, blue items faded; grey items stayed about the same. "
-               "Growing and fading mean a change of at least 1.5 times; items with fewer than two documents are left neutral.");
+               cmpKind == 1 ? "Colours every item of the current map by how its share of documents differs between source A and source B. Red items are more present in B, blue items in A; grey items are about the same. "
+                              "More / less present means a difference of at least 1.5 times; items with fewer than two documents are left neutral."
+                            : "Colours every item of the current map by how its share of documents changed from period A to period B. Red items grew, blue items faded; grey items stayed about the same. "
+                              "Growing and fading mean a change of at least 1.5 times; items with fewer than two documents are left neutral.");
   if (!hasMap() || P->mapSource != "analysis") {
     float h = ui.textWrap({L.x, L.y, L.w, 200 * s}, "Build a map from the records to compare its items between the periods.", 12 * s, ui.c.textDim);
     L.y += h + 8 * s;
@@ -137,7 +155,7 @@ void App::trendsDifference(Lay& L) {
     if (ui.button(b2[0], diffRestore.active ? "Update Map" : "Show on Map", BTN_PRIMARY, "sparkle", !busy())) diffShowOnMap();
     if (ui.button(b2[1], "Restore Colours", BTN_NORMAL, "undo", diffRestore.active)) diffClear();
   }
-  ui.text(L.row(18 * s), "A: " + period(pdiff.a0, pdiff.a1) + ", " + plural(pdiff.nA, "document") + " \xC2\xB7 B: " + period(pdiff.b0, pdiff.b1) + ", " + plural(pdiff.nB, "document"), 11.5f * s, ui.c.textDim);
+  ui.text(L.row(18 * s), (cmpKind == 1 ? pdTitleA : "A: " + period(pdiff.a0, pdiff.a1)) + ", " + plural(pdiff.nA, "document") + " \xC2\xB7 " + (cmpKind == 1 ? pdTitleB : "B: " + period(pdiff.b0, pdiff.b1)) + ", " + plural(pdiff.nB, "document"), 11.5f * s, ui.c.textDim);
   L.space(4 * s);
   ui.segmented(L.row(28 * s), {"Growing", "Appearing", "Fading"}, pdList, "pdlist");
   vector<int> idx;

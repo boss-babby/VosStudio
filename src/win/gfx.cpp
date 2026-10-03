@@ -93,6 +93,8 @@ void Gfx::createTargets() {
 }
 
 void Gfx::releaseTargets() {
+  copyDrop(canvasCopy);
+  copyDrop(overlayCopy);
   dc->SetTarget(nullptr);
   target.reset();
   rtvBack.reset();
@@ -137,6 +139,44 @@ void Gfx::endD2D() {
   if (hr == HRESULT(D2DERR_RECREATE_TARGET)) { releaseTargets(); createTargets(); }
 }
 
+void Gfx::copyDrop(BackCopy& c) {
+  c.valid = false;
+  c.bmp.reset();
+  c.tex.reset();
+  c.w = c.h = 0;
+}
+
+bool Gfx::copyCapture(BackCopy& c) {
+  c.valid = false;
+  if (!backTex || !dc || W <= 0 || H <= 0) return false;
+  if (!c.tex || !c.bmp || c.w != W || c.h != H) {
+    c.bmp.reset();
+    c.tex.reset();
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = UINT(W); td.Height = UINT(H); td.MipLevels = 1; td.ArraySize = 1; td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(dev->CreateTexture2D(&td, nullptr, c.tex.put()))) { c.tex.reset(); return false; }
+    Com<IDXGISurface> surf;
+    if (FAILED(c.tex->QueryInterface(__uuidof(IDXGISurface), reinterpret_cast<void**>(surf.put())))) { c.tex.reset(); return false; }
+    D2D1_BITMAP_PROPERTIES1 bp = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_NONE, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96, 96);
+    if (FAILED(dc->CreateBitmapFromDxgiSurface(surf.get(), &bp, c.bmp.put()))) { c.bmp.reset(); c.tex.reset(); return false; }
+    c.w = W;
+    c.h = H;
+  }
+  dc->Flush();  // pending Direct2D work reaches the back buffer before it is copied (harmless outside BeginDraw)
+  ctx->CopyResource(c.tex.get(), backTex.get());
+  c.valid = true;
+  return true;
+}
+
+bool Gfx::copyRestore(const BackCopy& c) {
+  if (!c.valid || !c.bmp || c.w != W || c.h != H) return false;
+  dc->SetTransform(D2D1::Matrix3x2F::Identity());
+  D2D1_RECT_F r = D2D1::RectF(0, 0, float(W), float(H));
+  dc->DrawBitmap(c.bmp.get(), &r, 1.f, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, &r);
+  return true;
+}
+
 bool Gfx::present(bool vsync) { return swap->Present(vsync ? 1 : 0, 0) != HRESULT(DXGI_STATUS_OCCLUDED); }
 bool Gfx::presentTest() { return swap->Present(0, DXGI_PRESENT_TEST) != HRESULT(DXGI_STATUS_OCCLUDED); }
 void Gfx::trim() {
@@ -164,6 +204,54 @@ bool Gfx::readback(vector<uint8_t>& bgra, int& w, int& h) {
   return true;
 }
 
+bool Gfx::encodeJpegWic(int w, int h, const uint8_t* bgra, float quality, string& out) {
+  out.clear();
+  if (!wic || w <= 0 || h <= 0) return false;
+  Com<IStream> stream;
+  if (FAILED(CreateStreamOnHGlobal(nullptr, TRUE, stream.put()))) return false;
+  Com<IWICBitmapEncoder> enc;
+  if (FAILED(wic->CreateEncoder(GUID_ContainerFormatJpeg, nullptr, enc.put()))) return false;
+  if (FAILED(enc->Initialize(stream.get(), WICBitmapEncoderNoCache))) return false;
+  Com<IWICBitmapFrameEncode> frame;
+  Com<IPropertyBag2> props;
+  if (FAILED(enc->CreateNewFrame(frame.put(), props.put()))) return false;
+  if (props) {
+    PROPBAG2 opt{};
+    wchar_t name[] = L"ImageQuality";
+    opt.pstrName = name;
+    VARIANT v;
+    VariantInit(&v);
+    v.vt = VT_R4;
+    v.fltVal = std::max(0.05f, std::min(1.f, quality));
+    props->Write(1, &opt, &v);
+  }
+  if (FAILED(frame->Initialize(props.get()))) return false;
+  if (FAILED(frame->SetSize(UINT(w), UINT(h)))) return false;
+  WICPixelFormatGUID fmt = GUID_WICPixelFormat24bppBGR;
+  if (FAILED(frame->SetPixelFormat(&fmt))) return false;
+  bool bgr = IsEqualGUID(fmt, GUID_WICPixelFormat24bppBGR) != 0;
+  if (!bgr && !IsEqualGUID(fmt, GUID_WICPixelFormat32bppBGRA) && !IsEqualGUID(fmt, GUID_WICPixelFormat32bppBGR)) return false;
+  UINT stride = bgr ? UINT(w) * 3 : UINT(w) * 4;
+  vector<uint8_t> row(size_t(stride) * size_t(h));
+  for (int y = 0; y < h; y++) {
+    const uint8_t* src = bgra + size_t(y) * size_t(w) * 4;
+    uint8_t* dst = &row[size_t(y) * stride];
+    if (bgr) { for (int x = 0; x < w; x++) { dst[x * 3] = src[x * 4]; dst[x * 3 + 1] = src[x * 4 + 1]; dst[x * 3 + 2] = src[x * 4 + 2]; } }
+    else { memcpy(dst, src, size_t(w) * 4); for (int x = 0; x < w; x++) dst[x * 4 + 3] = 255; }
+  }
+  if (FAILED(frame->WritePixels(UINT(h), stride, UINT(row.size()), row.data()))) return false;
+  if (FAILED(frame->Commit()) || FAILED(enc->Commit())) return false;
+  STATSTG st{};
+  if (FAILED(stream->Stat(&st, STATFLAG_NONAME))) return false;
+  HGLOBAL hg = nullptr;
+  if (FAILED(GetHGlobalFromStream(stream.get(), &hg)) || !hg) return false;
+  const char* mem = static_cast<const char*>(GlobalLock(hg));
+  if (!mem) return false;
+  out.assign(mem, size_t(st.cbSize.QuadPart));
+  GlobalUnlock(hg);
+  return !out.empty();
+}
+
 bool Gfx::savePngWic(const string& path, int w, int h, const uint8_t* bgra, double dpi) {
   // encode with the portable PNG writer (keeps pHYs DPI metadata exact); convert BGRA -> RGBA
   vector<uint8_t> rgba(size_t(w) * size_t(h) * 4);
@@ -178,14 +266,14 @@ bool Gfx::savePngWic(const string& path, int w, int h, const uint8_t* bgra, doub
   return writeFileU(path, pngEncode(w, h, rgba.data(), alpha, dpi));
 }
 
-IDWriteTextFormat* Gfx::format(float size, int weight, bool mono, bool italic) {
-  uint64_t key = (uint64_t(size * 16) << 20) ^ (uint64_t(weight) << 4) ^ (mono ? 1 : 0) ^ (italic ? 2 : 0);
+IDWriteTextFormat* Gfx::format(float size, int weight, bool mono, bool italic, bool wrap) {
+  uint64_t key = (uint64_t(size * 16) << 20) ^ (uint64_t(weight) << 4) ^ (mono ? 1 : 0) ^ (italic ? 2 : 0) ^ (wrap ? 4 : 0);
   auto it = fmts_.find(key);
   if (it != fmts_.end()) return it->second.get();
   Com<IDWriteTextFormat> f;
   dw->CreateTextFormat(widen(mono ? monoFamily : uiFamily).c_str(), nullptr, DWRITE_FONT_WEIGHT(weight), italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
                        DWRITE_FONT_STRETCH_NORMAL, size, L"en-us", f.put());
-  if (f) f->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+  if (f) f->SetWordWrapping(wrap ? DWRITE_WORD_WRAPPING_WRAP : DWRITE_WORD_WRAPPING_NO_WRAP);
   fmts_[key] = f;
   return f.get();
 }
@@ -240,15 +328,17 @@ void drawScene(ID2D1RenderTarget* rt, ID2D1Factory* f, IDWriteFactory* dw, Gfx& 
   rt->GetTransform(&old);
   rt->SetTransform(D2D1::Matrix3x2F::Scale(s, s) * D2D1::Matrix3x2F::Translation(ox, oy) * old);
   std::wstring fam = widen(serif ? g.resolveFamily({"Times New Roman", "Liberation Serif", "DejaVu Serif"}) : g.resolveFamily({"Arial", "Helvetica", "Liberation Sans", "Segoe UI", "DejaVu Sans"}));
-  std::map<std::pair<int, bool>, Com<IDWriteTextFormat>> fcache;
+  std::map<std::pair<int, int>, Com<IDWriteTextFormat>> fcache;
   std::map<uint32_t, Com<ID2D1GradientStopCollection>> gcache;
   Com<ID2D1StrokeStyle> haloStroke;
-  auto fmt = [&](float size, bool bold) {
-    auto key = std::make_pair(int(size * 20), bold);
+  std::wstring famMono;
+  auto fmt = [&](float size, bool bold, bool italic = false, bool mono = false) {
+    auto key = std::make_pair(int(size * 20), (bold ? 1 : 0) | (italic ? 2 : 0) | (mono ? 4 : 0));
     auto it = fcache.find(key);
     if (it != fcache.end()) return it->second.get();
+    if (mono && famMono.empty()) famMono = widen(g.resolveFamily({"Consolas", "Cascadia Mono", "Courier New", "DejaVu Sans Mono"}));
     Com<IDWriteTextFormat> tf;
-    dw->CreateTextFormat(fam.c_str(), nullptr, bold ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, L"en-us", tf.put());
+    dw->CreateTextFormat(mono ? famMono.c_str() : fam.c_str(), nullptr, bold ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL, italic ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, L"en-us", tf.put());
     if (tf) tf->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
     fcache[key] = tf;
     return tf.get();
@@ -320,12 +410,13 @@ void drawScene(ID2D1RenderTarget* rt, ID2D1Factory* f, IDWriteFactory* dw, Gfx& 
         break;
       }
       case Prim::Text: {
-        IDWriteTextFormat* tf = fmt(p.size, p.bold);
+        IDWriteTextFormat* tf = fmt(p.size, p.bold, p.italic, p.mono);
         if (!tf) break;
         std::wstring ws = widen(p.text);
         Com<IDWriteTextLayout> lay;
         dw->CreateTextLayout(ws.c_str(), UINT32(ws.size()), tf, 10000, 1000, lay.put());
         if (!lay) break;
+        if (p.underline) { DWRITE_TEXT_RANGE all{0, UINT32(ws.size())}; lay->SetUnderline(TRUE, all); }
         DWRITE_TEXT_METRICS tm;
         lay->GetMetrics(&tm);
         DWRITE_LINE_METRICS lm;
@@ -386,6 +477,81 @@ bool renderSceneBGRA(Gfx& g, const Scene& sc, double dpi, vector<uint8_t>& bgra,
   WICRect r{0, 0, w, h};
   bgra.resize(size_t(w) * size_t(h) * 4);
   return SUCCEEDED(bmp->CopyPixels(&r, UINT(w * 4), UINT(bgra.size()), bgra.data()));
+}
+
+bool makeHybridScene(Gfx& g, const Scene& source, double dpi, Scene& hybrid, string* err) {
+  hybrid.W = source.W; hybrid.H = source.H; hybrid.serif = source.serif;
+  hybrid.warnings = source.warnings; hybrid.labels = source.labels; hybrid.candidates = source.candidates;
+  hybrid.minLine = source.minLine; hybrid.minLabel = source.minLabel;
+  hybrid.items.clear(); hybrid.items.reserve(source.items.size());
+  auto paintable = [](const Prim& p) { return p.type == Prim::Image || p.fill || p.stroke; };
+  size_t i = 0;
+  while (i < source.items.size()) {
+    if (source.items[i].type == Prim::Text) {
+      hybrid.items.push_back(source.items[i++]);
+      continue;
+    }
+    vector<size_t> run;
+    while (i < source.items.size() && source.items[i].type != Prim::Text) {
+      if (paintable(source.items[i])) run.push_back(i);
+      ++i;
+    }
+    if (run.empty()) continue;
+
+    double x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30;
+    auto bounds = [&](double ax, double ay, double bx, double by, double pad) {
+      x0 = std::min(x0, std::min(ax, bx) - pad); y0 = std::min(y0, std::min(ay, by) - pad);
+      x1 = std::max(x1, std::max(ax, bx) + pad); y1 = std::max(y1, std::max(ay, by) + pad);
+    };
+    for (size_t index : run) {
+      const Prim& p = source.items[index];
+      double pad = p.stroke ? std::max(0.5, double(p.sw) * 0.5) : 0.0;
+      if (p.type == Prim::Rect || p.type == Prim::Image) bounds(p.x, p.y, p.x + p.w, p.y + p.h, pad);
+      else if (p.type == Prim::Circle) bounds(p.x - p.r, p.y - p.r, p.x + p.r, p.y + p.r, pad);
+      else if (p.type == Prim::Path) for (const PathCmd& d : p.d) {
+        if (d.op == 'M' || d.op == 'L') bounds(d.x1, d.y1, d.x1, d.y1, pad);
+        else if (d.op == 'Q') { bounds(d.x1, d.y1, d.x1, d.y1, pad); bounds(d.x2, d.y2, d.x2, d.y2, pad); }
+      }
+    }
+    if (!(x0 < x1 && y0 < y1)) continue;
+    // A point of transparent padding retains antialias coverage on strokes at the crop edge.
+    x0 = clampv(std::floor(x0 - 1.0), 0.0, source.W); y0 = clampv(std::floor(y0 - 1.0), 0.0, source.H);
+    x1 = clampv(std::ceil(x1 + 1.0), 0.0, source.W); y1 = clampv(std::ceil(y1 + 1.0), 0.0, source.H);
+    if (!(x0 < x1 && y0 < y1)) continue;
+
+    Scene crop;
+    crop.W = x1 - x0; crop.H = y1 - y0; crop.serif = source.serif;
+    crop.items.reserve(run.size());
+    for (size_t index : run) {
+      Prim p = source.items[index];
+      p.x -= float(x0); p.y -= float(y0);
+      if (p.type == Prim::Path) for (PathCmd& d : p.d) {
+        if (d.op == 'M' || d.op == 'L' || d.op == 'Q') { d.x1 -= float(x0); d.y1 -= float(y0); }
+        if (d.op == 'Q') { d.x2 -= float(x0); d.y2 -= float(y0); }
+      }
+      crop.items.push_back(std::move(p));
+    }
+    vector<uint8_t> bgra;
+    int w = 0, h = 0;
+    if (!renderSceneBGRA(g, crop, dpi, bgra, w, h, true)) {
+      if (err) *err = "Hybrid raster layer rendering failed (the selected DPI may exceed the available image size).";
+      return false;
+    }
+    Prim image;
+    image.type = Prim::Image; image.group = "hybrid-artwork";
+    image.x = float(x0); image.y = float(y0); image.w = float(crop.W); image.h = float(crop.H);
+    image.imgW = w; image.imgH = h; image.rgba.resize(bgra.size());
+    // renderSceneBGRA returns premultiplied BGRA; SVG PNG and PDF soft masks require straight RGBA.
+    for (size_t k = 0; k + 3 < bgra.size(); k += 4) {
+      uint8_t a = bgra[k + 3];
+      image.rgba[k] = a ? uint8_t(std::min(255u, (unsigned(bgra[k + 2]) * 255u + a / 2u) / a)) : 0;
+      image.rgba[k + 1] = a ? uint8_t(std::min(255u, (unsigned(bgra[k + 1]) * 255u + a / 2u) / a)) : 0;
+      image.rgba[k + 2] = a ? uint8_t(std::min(255u, (unsigned(bgra[k]) * 255u + a / 2u) / a)) : 0;
+      image.rgba[k + 3] = a;
+    }
+    hybrid.items.push_back(std::move(image));
+  }
+  return true;
 }
 
 bool exportScenePNG(Gfx& g, const Scene& sc, double dpi, const string& path, string* err, bool transparent) {

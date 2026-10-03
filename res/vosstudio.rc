@@ -1,9 +1,15 @@
 #include <windows.h>
+#include "../src/win/version.h"
 APPICON ICON "vosstudio.ico"
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "vosstudio.manifest"
+// Both PDFium and Tectonic are checksum-pinned, deflate-compressed by tools/packres, and unpacked under LocalAppData.
+// The notices include PDFium's shipped licenses and Tectonic's MIT license.
+PDFIUM_DLL RCDATA "pdfium.bin"
+TECTONIC_EXE RCDATA "tectonic.bin"
+ENGINE_LICENSES RCDATA "engine_licenses.bin"
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 1,8,0,0
-PRODUCTVERSION 1,8,0,0
+FILEVERSION VOS_VERSION_COMMA
+PRODUCTVERSION VOS_VERSION_COMMA
 FILEOS 0x40004
 FILETYPE 0x1
 BEGIN
@@ -13,9 +19,9 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "VOSStudio"
       VALUE "FileDescription", "VOSStudio Native - bibliometric mapping (Direct3D 11 / Direct2D)"
-      VALUE "FileVersion", "1.8.0"
+      VALUE "FileVersion", VOS_VERSION_STR
       VALUE "ProductName", "VOSStudio Native"
-      VALUE "ProductVersion", "1.8.0"
+      VALUE "ProductVersion", VOS_VERSION_STR
     END
   END
   BLOCK "VarFileInfo"

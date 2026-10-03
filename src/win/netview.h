@@ -39,11 +39,14 @@ class NetView {
   void drawOverlay(ID2D1DeviceContext* dc, const Theme& th, bool showLabels, int maxLabels);  // labels, hulls, names
   // camera
   void fit(double pad = 60);
+  // Call when display positions or visibility change; invalidates projection-, bounds- and density-dependent caches.
+  void positionsChanged();
+  void visibilityChanged();
   double fitZoom() const { return fitZoom_; }
   bool worldToScreen(double x, double y, double z, float& sx, float& sy, float* depth = nullptr) const;
   void screenToWorld(float sx, float sy, double& x, double& y) const;
-  int hitNode(float sx, float sy) const;
-  vector<int> nodesInRect(const Rect& r) const;
+  int hitNode(float sx, float sy);
+  vector<int> nodesInRect(const Rect& r);
   float nodeRadiusPx(int i) const;
   const Encoder& enc() const { return enc_; }
   int labelsShown = 0;
@@ -72,6 +75,25 @@ class NetView {
   const Bundles* bundles_ = nullptr;
   Encoder enc_;
   double fitZoom_ = 1;
+  bool bounds3Valid_ = false;
+  double bounds3X_ = 0, bounds3Y_ = 0, bounds3Z_ = 0, bounds3R_ = 1;
+  // Node depth order changes with 3D yaw/pitch, but not with camera distance. Remember the last sorted view so
+  // zooming in 3D does not rebuild CPU instance buffers when only the view-projection constants changed.
+  bool depthOrderValid_ = false;
+  float depthOrderYaw_ = 0, depthOrderPitch_ = 0;
+  struct ScreenNode { float x = 0, y = 0, depth = 0, radius = 0; bool projected = false; };
+  std::unordered_map<uint64_t, vector<int>> hitGrid_;
+  vector<ScreenNode> hitScreen_;
+  vector<uint32_t> hitSeen_;
+  uint32_t hitQuery_ = 0;
+  bool hitGridValid_ = false;
+  uint64_t positionRevision_ = 0, hitPositionRevision_ = 0;
+  Camera hitCam_;
+  Rect hitVp_;
+  float hitUiScale_ = 0, hitGridCell_ = 64;
+  ViewKind hitKind_ = ViewKind::Network;
+  void ensureHitGrid();
+  void rebuildHitGrid();
   Com<ID3D11VertexShader> vsNode_, vsLink_, vsSplat_, vsFull_;
   Com<ID3D11PixelShader> psNode_, psLink_, psSplat_, psMap_;
   Com<ID3D11InputLayout> ilNode_, ilLink_;
@@ -100,10 +122,18 @@ class NetView {
   void ensureDensityTarget(int w, int h);
   // link colours at both ends and width in px (shared by the GPU upload and the vector capture)
   void linkStyle(int li, Color& ca, Color& cb, float& wid) const;
-  // density field (world units): kernel sigma and per-item weights used by the splats; densityT samples it
+  // Density caches use display positions and visibility, not camera transforms. The world-space grid serves both
+  // the CPU maximum estimate and exact local density-label queries; splats stay in a reusable dynamic GPU buffer.
   double avgItemDist();
-  double avgDist_ = 0, avgSig_ = 0, denSig_ = 1;
+  double avgDist_ = 0, denSig_ = 1;
+  bool avgDistValid_ = false;
   vector<float> denWt_;
+  bool denAuto_ = true, densityWeightsValid_ = false;
+  bool densityGridValid_ = false, densitySplatValid_ = false, densitySplatByCluster_ = false;
+  double densityGridCell_ = 0, densityGridSigma_ = 0;
+  std::unordered_map<uint64_t, vector<int>> densityGrid_;
+  Com<ID3D11Buffer> splatBuf_;
+  int splatCap_ = 0, nSplatInst_ = 0;
   float densityT(float sx, float sy) const;  // 0..1 colormap position at a screen point
   void updateLut(const string& name);
   std::map<string, std::pair<Com<IDWriteTextLayout>, int>> layouts_;

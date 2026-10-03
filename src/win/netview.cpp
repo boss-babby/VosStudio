@@ -3,11 +3,14 @@
 #include <d3dcompiler.h>
 
 #include <cstdio>
+#include <climits>
 
 namespace vs {
 namespace win {
 
 namespace {
+uint64_t cellKey(int64_t x, int64_t y) { return (uint64_t(uint32_t(x)) << 32) | uint64_t(uint32_t(y)); }
+int64_t cellCoord(double x, double cell) { return int64_t(std::floor(x / cell)); }
 const char* HLSL = R"HLSL(
 cbuffer CB : register(b0) {
   row_major float4x4 VP;
@@ -179,11 +182,32 @@ struct CBData {
 struct NodeInst { float x, y, z, r; float col[4]; float bcol[4]; float flg; float pad[3]; };
 struct LinkInst { float ax, ay, az, bx, by, bz; float ca[4]; float cb[4]; float wid, bund, lfl, pad; };
 
-bool compile(ID3D11Device* dev, const char* entry, const char* target, ID3DBlob** out, string* err) {
-  Com<ID3DBlob> e;
-  HRESULT hr = D3DCompile(HLSL, strlen(HLSL), "netview.hlsl", nullptr, nullptr, entry, target, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, out, e.put());
-  if (FAILED(hr)) { if (err) *err = string("Shader ") + entry + ": " + (e ? string(static_cast<const char*>(e->GetBufferPointer()), e->GetBufferSize()) : "compile failed"); return false; }
+// Shader bytecode cache: the HLSL is compiled once per machine and kept in %APPDATA%\VOSStudio\shaders, keyed by a
+// hash of the source, the entry point and the target. Saves the compiler's 100-300 ms at every start.
+string shaderCacheDir() {
+  string d = appDataDir() + "\\shaders";
+  CreateDirectoryW(widen(d).c_str(), nullptr);
+  return d;
+}
+string shaderKey(const char* entry, const char* target) {
+  uint64_t h = 1469598103934665603ull;
+  auto mix = [&](const char* p) { for (; *p; p++) { h ^= static_cast<unsigned char>(*p); h *= 1099511628211ull; } };
+  mix(HLSL); mix("|"); mix(entry); mix("|"); mix(target); mix("|o3v1");
+  char b[24];
+  snprintf(b, sizeof b, "%016llx", static_cast<unsigned long long>(h));
+  return b;
+}
+bool compile(ID3D11Device* dev, const char* entry, const char* target, string& code, string* err) {
   (void)dev;
+  string path = shaderCacheDir() + "\\" + shaderKey(entry, target) + ".cso";
+  bool ok = false;
+  code = readFileU(path, &ok);
+  if (ok && code.size() > 64) return true;
+  Com<ID3DBlob> out, e;
+  HRESULT hr = D3DCompile(HLSL, strlen(HLSL), "netview.hlsl", nullptr, nullptr, entry, target, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, out.put(), e.put());
+  if (FAILED(hr) || !out) { if (err) *err = string("Shader ") + entry + ": " + (e ? string(static_cast<const char*>(e->GetBufferPointer()), e->GetBufferSize()) : "compile failed"); return false; }
+  code.assign(static_cast<const char*>(out->GetBufferPointer()), out->GetBufferSize());
+  writeFileU(path, code);  // best effort; compiled again next time if it cannot be written
   return true;
 }
 void setC(float* d, const Color& c) { d[0] = c.r; d[1] = c.g; d[2] = c.b; d[3] = c.a; }
@@ -192,17 +216,23 @@ void setC(float* d, const Color& c) { d[0] = c.r; d[1] = c.g; d[2] = c.b; d[3] =
 bool NetView::init(Gfx& g, string* err) {
   g_ = &g;
   ID3D11Device* d = g.dev.get();
-  Com<ID3DBlob> b;
-  auto mkVS = [&](const char* e, Com<ID3D11VertexShader>& vs, Com<ID3DBlob>& keep) {
-    if (!compile(d, e, "vs_4_0", keep.put(), err)) return false;
-    return SUCCEEDED(d->CreateVertexShader(keep->GetBufferPointer(), keep->GetBufferSize(), nullptr, vs.put()));
+  auto mkVS = [&](const char* e, Com<ID3D11VertexShader>& vs, string& keep) {
+    if (!compile(d, e, "vs_4_0", keep, err)) return false;
+    if (SUCCEEDED(d->CreateVertexShader(keep.data(), keep.size(), nullptr, vs.put()))) return true;
+    // a stale or damaged cache file: compile afresh once
+    DeleteFileW(widen(shaderCacheDir() + "\\" + shaderKey(e, "vs_4_0") + ".cso").c_str());
+    if (!compile(d, e, "vs_4_0", keep, err)) return false;
+    return SUCCEEDED(d->CreateVertexShader(keep.data(), keep.size(), nullptr, vs.put()));
   };
   auto mkPS = [&](const char* e, Com<ID3D11PixelShader>& ps) {
-    Com<ID3DBlob> bb;
-    if (!compile(d, e, "ps_4_0", bb.put(), err)) return false;
-    return SUCCEEDED(d->CreatePixelShader(bb->GetBufferPointer(), bb->GetBufferSize(), nullptr, ps.put()));
+    string bb;
+    if (!compile(d, e, "ps_4_0", bb, err)) return false;
+    if (SUCCEEDED(d->CreatePixelShader(bb.data(), bb.size(), nullptr, ps.put()))) return true;
+    DeleteFileW(widen(shaderCacheDir() + "\\" + shaderKey(e, "ps_4_0") + ".cso").c_str());
+    if (!compile(d, e, "ps_4_0", bb, err)) return false;
+    return SUCCEEDED(d->CreatePixelShader(bb.data(), bb.size(), nullptr, ps.put()));
   };
-  Com<ID3DBlob> bn, bl, bs, bf;
+  string bn, bl, bs, bf;
   if (!mkVS("vsNode", vsNode_, bn) || !mkVS("vsLink", vsLink_, bl) || !mkVS("vsSplat", vsSplat_, bs) || !mkVS("vsFull", vsFull_, bf)) return false;
   if (!mkPS("psNode", psNode_) || !mkPS("psLink", psLink_) || !mkPS("psSplat", psSplat_) || !mkPS("psMap", psMap_) || !mkPS("psTex", psTex_)) return false;
   D3D11_INPUT_ELEMENT_DESC nl[] = {
@@ -212,7 +242,7 @@ bool NetView::init(Gfx& g, string* err) {
       {"BCOL", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D11_INPUT_PER_INSTANCE_DATA, 1},
       {"FLG", 0, DXGI_FORMAT_R32_FLOAT, 0, 48, D3D11_INPUT_PER_INSTANCE_DATA, 1},
   };
-  if (FAILED(d->CreateInputLayout(nl, 5, bn->GetBufferPointer(), bn->GetBufferSize(), ilNode_.put()))) { if (err) *err = "Node input layout failed"; return false; }
+  if (FAILED(d->CreateInputLayout(nl, 5, bn.data(), bn.size(), ilNode_.put()))) { if (err) *err = "Node input layout failed"; return false; }
   D3D11_INPUT_ELEMENT_DESC ll[] = {
       {"PA", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_INSTANCE_DATA, 1},
       {"PB", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_INSTANCE_DATA, 1},
@@ -222,7 +252,7 @@ bool NetView::init(Gfx& g, string* err) {
       {"BND", 0, DXGI_FORMAT_R32_FLOAT, 0, 60, D3D11_INPUT_PER_INSTANCE_DATA, 1},
       {"LFL", 0, DXGI_FORMAT_R32_FLOAT, 0, 64, D3D11_INPUT_PER_INSTANCE_DATA, 1},
   };
-  if (FAILED(d->CreateInputLayout(ll, 7, bl->GetBufferPointer(), bl->GetBufferSize(), ilLink_.put()))) { if (err) *err = "Link input layout failed"; return false; }
+  if (FAILED(d->CreateInputLayout(ll, 7, bl.data(), bl.size(), ilLink_.put()))) { if (err) *err = "Link input layout failed"; return false; }
   D3D11_BUFFER_DESC cbd{};
   cbd.ByteWidth = sizeof(CBData);
   cbd.Usage = D3D11_USAGE_DYNAMIC;
@@ -267,6 +297,27 @@ void NetView::setData(const Network* net, const ViewStyle* st, const Bundles* bu
     for (int i = 0; i < net->n(); i++) pos[i] = {float(net->nodes[i].x), float(net->nodes[i].y), float(net->nodes[i].z)};
   }
   nodesDirty = linksDirty = true;
+  depthOrderValid_ = false;
+  bounds3Valid_ = false;
+  avgDistValid_ = false;
+  densityWeightsValid_ = densityGridValid_ = densitySplatValid_ = false;
+  ++positionRevision_;
+  hitGridValid_ = false;
+}
+
+void NetView::positionsChanged() {
+  bounds3Valid_ = false;
+  avgDistValid_ = false;
+  densityGridValid_ = densitySplatValid_ = false;
+  ++positionRevision_;
+  hitGridValid_ = false;
+  nodesDirty = linksDirty = true;
+}
+
+void NetView::visibilityChanged() {
+  avgDistValid_ = false;
+  densityGridValid_ = densitySplatValid_ = false;
+  nodesDirty = linksDirty = true;
 }
 
 float NetView::nodeRadiusPx(int i) const {
@@ -293,12 +344,18 @@ void NetView::buildMatrices() {
     pxPerWorld_ = float(z);
     return;
   }
-  // 3D orbit around the layout centroid
-  double cx = 0, cy = 0, cz = 0, R = 1;
-  int n = int(pos.size());
-  for (auto& p : pos) { cx += p[0]; cy += p[1]; cz += p[2]; }
-  if (n) { cx /= n; cy /= n; cz /= n; }
-  for (auto& p : pos) R = std::max(R, std::sqrt(sq(p[0] - cx) + sq(p[1] - cy) + sq(p[2] - cz)));
+  // 3D orbit around the layout centroid. Bounds depend on displayed positions, not the camera; cache them so
+  // camera-only frames do not rescan all nodes before rendering.
+  if (!bounds3Valid_) {
+    double cx = 0, cy = 0, cz = 0, R = 1;
+    int n = int(pos.size());
+    for (const auto& p : pos) { cx += p[0]; cy += p[1]; cz += p[2]; }
+    if (n) { cx /= n; cy /= n; cz /= n; }
+    for (const auto& p : pos) R = std::max(R, std::sqrt(sq(p[0] - cx) + sq(p[1] - cy) + sq(p[2] - cz)));
+    bounds3X_ = cx; bounds3Y_ = cy; bounds3Z_ = cz; bounds3R_ = R;
+    bounds3Valid_ = true;
+  }
+  double cx = bounds3X_, cy = bounds3Y_, cz = bounds3Z_, R = bounds3R_;
   double dist = R * 2.7 * cam.dist3;
   double cp = std::cos(cam.pitch), spch = std::sin(cam.pitch);
   double ex = cx + dist * cp * std::sin(cam.yaw), ey = -cy + dist * spch, ez = cz - dist * cp * std::cos(cam.yaw);
@@ -368,30 +425,86 @@ void NetView::fit(double pad) {
   fitZoom_ = cam.zoom;
 }
 
-int NetView::hitNode(float sx, float sy) const {
+void NetView::ensureHitGrid() {
+  bool cameraChanged = cam.x != hitCam_.x || cam.y != hitCam_.y || cam.zoom != hitCam_.zoom || cam.yaw != hitCam_.yaw ||
+                       cam.pitch != hitCam_.pitch || cam.dist3 != hitCam_.dist3;
+  bool viewportChanged = vp.x != hitVp_.x || vp.y != hitVp_.y || vp.w != hitVp_.w || vp.h != hitVp_.h;
+  if (!hitGridValid_ || hitPositionRevision_ != positionRevision_ || cameraChanged || viewportChanged || hitUiScale_ != uiScale || hitKind_ != kind)
+    rebuildHitGrid();
+}
+
+void NetView::rebuildHitGrid() {
+  hitGrid_.clear();
+  hitScreen_.assign(net_ ? std::min<size_t>(pos.size(), size_t(net_->n())) : 0, ScreenNode{});
+  hitSeen_.assign(hitScreen_.size(), 0);
+  hitQuery_ = 0;
+  if (net_ && !pos.empty() && vp.w > 0 && vp.h > 0) {
+    buildMatrices();
+    float maxR = 0;
+    for (int i = 0; i < int(hitScreen_.size()); i++) {
+      float sx, sy, dep = 0;
+      if (!worldToScreen(pos[size_t(i)][0], pos[size_t(i)][1], pos[size_t(i)][2], sx, sy, &dep)) continue;
+      float r = nodeRadiusPx(i) + 3;
+      if (!std::isfinite(r) || r < 0) continue;
+      hitScreen_[size_t(i)] = {sx, sy, dep, r, true};
+      maxR = std::max(maxR, r);
+    }
+    // Insert each node into every cell touched by its hit radius. Hit testing then reads one cell; box selection
+    // visits only intersecting cells and applies the original exact center-in-rectangle test.
+    hitGridCell_ = std::max(32.f * std::max(1.f, uiScale), maxR * 2 + 2);
+    hitGrid_.reserve(hitScreen_.size() * 2 + 1);
+    for (int i = 0; i < int(hitScreen_.size()); i++) {
+      const ScreenNode& p = hitScreen_[size_t(i)];
+      if (!p.projected) continue;
+      int64_t x0 = cellCoord(p.x - p.radius, hitGridCell_), x1 = cellCoord(p.x + p.radius, hitGridCell_);
+      int64_t y0 = cellCoord(p.y - p.radius, hitGridCell_), y1 = cellCoord(p.y + p.radius, hitGridCell_);
+      for (int64_t y = y0; y <= y1; y++) for (int64_t x = x0; x <= x1; x++) hitGrid_[cellKey(x, y)].push_back(i);
+    }
+  }
+  hitCam_ = cam; hitVp_ = vp; hitUiScale_ = uiScale; hitKind_ = kind;
+  hitPositionRevision_ = positionRevision_;
+  hitGridValid_ = true;
+}
+
+int NetView::hitNode(float sx, float sy) {
   if (!net_) return -1;
+  ensureHitGrid();
+  auto it = hitGrid_.find(cellKey(cellCoord(sx, hitGridCell_), cellCoord(sy, hitGridCell_)));
+  if (it == hitGrid_.end()) return -1;
   int best = -1;
   float bd = 1e9f, bestDepth = 1e18f;
-  for (int i = 0; i < net_->n() && i < int(pos.size()); i++) {
-    if (flags[i] & NF_HIDDEN) continue;
-    float x, y, dep = 0;
-    if (!worldToScreen(pos[i][0], pos[i][1], pos[i][2], x, y, &dep)) continue;
-    float r = nodeRadiusPx(i) + 3;
-    float d = std::hypot(x - sx, y - sy);
-    if (d <= r) {
-      if (is3D() ? dep < bestDepth : d / r < bd) { best = i; bd = d / r; bestDepth = dep; }
+  for (int i : it->second) {
+    if (size_t(i) >= flags.size() || (flags[size_t(i)] & NF_HIDDEN)) continue;
+    const ScreenNode& p = hitScreen_[size_t(i)];
+    float d = std::hypot(p.x - sx, p.y - sy);
+    if (d <= p.radius) {
+      if (is3D() ? p.depth < bestDepth : d / p.radius < bd) { best = i; bd = d / p.radius; bestDepth = p.depth; }
     }
   }
   return best;
 }
 
-vector<int> NetView::nodesInRect(const Rect& r) const {
+vector<int> NetView::nodesInRect(const Rect& r) {
   vector<int> out;
-  if (!net_) return out;
-  for (int i = 0; i < net_->n() && i < int(pos.size()); i++) {
-    if (flags[i] & NF_HIDDEN) continue;
-    float x, y;
-    if (worldToScreen(pos[i][0], pos[i][1], pos[i][2], x, y) && r.has(x, y)) out.push_back(i);
+  if (!net_ || r.w <= 0 || r.h <= 0) return out;
+  ensureHitGrid();
+  int64_t x0 = cellCoord(r.x, hitGridCell_), x1 = cellCoord(r.r(), hitGridCell_);
+  int64_t y0 = cellCoord(r.y, hitGridCell_), y1 = cellCoord(r.b(), hitGridCell_);
+  if (++hitQuery_ == 0) { std::fill(hitSeen_.begin(), hitSeen_.end(), 0); hitQuery_ = 1; }
+  vector<int> candidates;
+  for (int64_t y = y0; y <= y1; y++) for (int64_t x = x0; x <= x1; x++) {
+    auto it = hitGrid_.find(cellKey(x, y));
+    if (it == hitGrid_.end()) continue;
+    for (int i : it->second) if (size_t(i) < hitSeen_.size() && hitSeen_[size_t(i)] != hitQuery_) {
+      hitSeen_[size_t(i)] = hitQuery_;
+      candidates.push_back(i);
+    }
+  }
+  std::sort(candidates.begin(), candidates.end());  // preserve the previous node-index selection order
+  for (int i : candidates) {
+    if (size_t(i) >= flags.size() || (flags[size_t(i)] & NF_HIDDEN)) continue;
+    const ScreenNode& p = hitScreen_[size_t(i)];
+    if (p.projected && r.has(p.x, p.y)) out.push_back(i);
   }
   return out;
 }
@@ -621,14 +734,14 @@ void NetView::updateLut(const string& name) {
 }
 
 double NetView::avgItemDist() {
+  if (avgDistValid_) return avgDist_;
+  avgDistValid_ = true;
   int n = net_ ? net_->n() : 0;
-  if (n < 2 || pos.size() != size_t(n)) return 0;
-  double sig = n;
-  for (int i = 0; i < n; i++) sig += pos[i][0] * 1.7 + pos[i][1] * 0.3 + (flags[i] & NF_HIDDEN ? 7.0 : 0.0);
-  if (sig == avgSig_ && avgDist_ > 0) return avgDist_;
-  avgSig_ = sig;
+  avgDist_ = 0;
+  if (n < 2 || pos.size() != size_t(n)) return avgDist_;
   vector<int> vis;
-  for (int i = 0; i < n; i++) if (!(flags[i] & NF_HIDDEN)) vis.push_back(i);
+  vis.reserve(size_t(n));
+  for (int i = 0; i < n; i++) if (i >= int(flags.size()) || !(flags[size_t(i)] & NF_HIDDEN)) vis.push_back(i);
   int m = int(vis.size());
   double sum = 0, cnt = 0;
   if (m <= 2000) {
@@ -647,14 +760,18 @@ double NetView::avgItemDist() {
 }
 
 float NetView::densityT(float sx, float sy) const {
-  if (!net_ || denWt_.size() != size_t(net_->n()) || densityMax <= 0) return 0;
+  if (!net_ || denWt_.size() != size_t(net_->n()) || !densityGridValid_ || densityGridCell_ <= 0 || densityMax <= 0) return 0;
   double x, y;
   screenToWorld(sx, sy, x, y);
   double sig = denSig_, cut2 = sq(3 * sig), s = 0;
-  for (int j = 0; j < net_->n(); j++) {
-    if (flags[j] & NF_HIDDEN) continue;
-    double d2 = sq(x - pos[j][0]) + sq(y - pos[j][1]);
-    if (d2 < cut2) s += denWt_[size_t(j)] * std::exp(-0.5 * d2 / (sig * sig));
+  int64_t gx = cellCoord(x, densityGridCell_), gy = cellCoord(y, densityGridCell_);
+  for (int dx = -1; dx <= 1; dx++) for (int dy = -1; dy <= 1; dy++) {
+    auto it = densityGrid_.find(cellKey(gx + dx, gy + dy));
+    if (it == densityGrid_.end()) continue;
+    for (int j : it->second) {
+      double d2 = sq(x - pos[size_t(j)][0]) + sq(y - pos[size_t(j)][1]);
+      if (d2 < cut2) s += denWt_[size_t(j)] * std::exp(-0.5 * d2 / (sig * sig));
+    }
   }
   double v = clampv(s / densityMax, 0.0, 1.0);
   return float(std::pow(v, 1.0 / std::max(0.2, double(st_->densityAlpha)) * 0.55));
@@ -665,9 +782,17 @@ void NetView::renderGpu(const Color& bg) {
   frame_++;
   auto* c = g_->ctx.get();
   buildMatrices();
-  if (is3D()) nodesDirty = true;  // depth order changes with the orbit
-  if (nodesDirty) { uploadNodes(); }
-  if (linksDirty || nodesDirty) { uploadLinks(); }
+  bool is3d = is3D();
+  bool depthOrderChanged = is3d && (!depthOrderValid_ || cam.yaw != depthOrderYaw_ || cam.pitch != depthOrderPitch_);
+  if (depthOrderChanged) nodesDirty = true;
+  if (nodesDirty) {
+    uploadNodes();
+    if (is3d) { depthOrderYaw_ = cam.yaw; depthOrderPitch_ = cam.pitch; depthOrderValid_ = true; }
+    else depthOrderValid_ = false;
+  }
+  // Link endpoints are transformed by the current GPU view-projection matrix. Camera orbit/zoom therefore
+  // does not change their instance data and must not trigger an O(E) CPU rebuild or D3D buffer upload.
+  if (linksDirty) uploadLinks();
   nodesDirty = linksDirty = false;
   const ViewStyle& S = *st_;
   CBData cbd{};
@@ -686,42 +811,55 @@ void NetView::renderGpu(const Color& bg) {
   cbd.lineMul = 1;
   cbd.bundleCount = float(std::max(2, bundleStride_));
   cbd.denScale = 0.5f;
-  // kernel: VOSviewer / van Eck & Waltman (2010) use exp(-(r / (0.125 * dbar))^2) with dbar the average distance
-  // between items, i.e. a Gaussian with sigma = 0.125 * dbar / sqrt(2); Studio used a fixed world width
-  cbd.sigmaW = float(S.kernelAuto ? 0.125 * avgItemDist() / std::sqrt(2.0) * S.kernel : 38.5 * S.kernel);
-  if (!(cbd.sigmaW > 0)) cbd.sigmaW = float(38.5 * S.kernel);
-  denSig_ = cbd.sigmaW;
-  denWt_.assign(size_t(net_->n()), 0.f);
-  for (int i = 0; i < net_->n(); i++)
-    denWt_[size_t(i)] = float(S.kernelAuto ? std::max(0.0, enc_.weightT(i)) : 0.25 + 0.75 * std::sqrt(enc_.weightT(i)));
+  if (kind == ViewKind::Density) {
+    // The auto kernel needs an average-distance estimate. Other plot types never use sigmaW, so avoid doing that work there.
+    cbd.sigmaW = float(S.kernelAuto ? 0.125 * avgItemDist() / std::sqrt(2.0) * S.kernel : 38.5 * S.kernel);
+    if (!(cbd.sigmaW > 0)) cbd.sigmaW = float(38.5 * S.kernel);
+    denSig_ = cbd.sigmaW;
+    if (!densityWeightsValid_ || denWt_.size() != size_t(net_->n()) || denAuto_ != S.kernelAuto) {
+      // Per-item weights depend on map/style data and kernel mode, never on camera movement.
+      denAuto_ = S.kernelAuto;
+      denWt_.assign(size_t(net_->n()), 0.f);
+      for (int i = 0; i < net_->n(); i++)
+        denWt_[size_t(i)] = float(S.kernelAuto ? std::max(0.0, enc_.weightT(i)) : 0.25 + 0.75 * std::sqrt(enc_.weightT(i)));
+      densityWeightsValid_ = true;
+      densityGridValid_ = densitySplatValid_ = false;
+    }
+  }
   D3D11_VIEWPORT v{vp.x, vp.y, vp.w, vp.h, 0, 1};
   c->RSSetViewports(1, &v);
   c->RSSetState(rs_.get());
   float bf[4] = {0, 0, 0, 0};
   if (kind == ViewKind::Density) {
-    // estimate the field maximum on the CPU (kernel sum at item positions, grid-accelerated)
-    double sig = cbd.sigmaW, cut = 3 * sig;
-    std::unordered_map<int64_t, vector<int>> grid;
-    auto key = [&](double x, double y) { return (int64_t(std::floor(x / cut)) << 32) ^ int64_t(uint32_t(int32_t(std::floor(y / cut)))); };
-    for (int i = 0; i < net_->n(); i++) if (!(flags[i] & NF_HIDDEN)) grid[key(pos[i][0], pos[i][1])].push_back(i);
-    double mx = 1e-6;
-    for (int i = 0; i < net_->n(); i++) {
-      if (flags[i] & NF_HIDDEN) continue;
-      double s = 0;
-      int gx = int(std::floor(pos[i][0] / cut)), gy = int(std::floor(pos[i][1] / cut));
-      for (int dx = -1; dx <= 1; dx++)
-        for (int dy = -1; dy <= 1; dy++) {
-          auto it = grid.find((int64_t(gx + dx) << 32) ^ int64_t(uint32_t(int32_t(gy + dy))));
-          if (it == grid.end()) continue;
+    // Cache the world-space kernel maximum and neighborhood index across camera-only redraws. The same grid
+    // accelerates density-label sampling in drawOverlay; only positions, visibility, weights or kernel sigma invalidate it.
+    double sig = std::max(1e-6, double(cbd.sigmaW)), cut = 3 * sig;
+    if (!densityGridValid_ || densityGridSigma_ != sig || densityGridCell_ != cut) {
+      densityGrid_.clear();
+      densityGrid_.reserve(size_t(net_->n()));
+      for (int i = 0; i < net_->n(); i++) if (!(flags[size_t(i)] & NF_HIDDEN)) {
+        int64_t gx = cellCoord(pos[size_t(i)][0], cut), gy = cellCoord(pos[size_t(i)][1], cut);
+        densityGrid_[cellKey(gx, gy)].push_back(i);
+      }
+      double mx = 1e-6;
+      for (int i = 0; i < net_->n(); i++) {
+        if (flags[size_t(i)] & NF_HIDDEN) continue;
+        double sum = 0;
+        int64_t gx = cellCoord(pos[size_t(i)][0], cut), gy = cellCoord(pos[size_t(i)][1], cut);
+        for (int dx = -1; dx <= 1; dx++) for (int dy = -1; dy <= 1; dy++) {
+          auto it = densityGrid_.find(cellKey(gx + dx, gy + dy));
+          if (it == densityGrid_.end()) continue;
           for (int j : it->second) {
-            double d2 = sq(pos[i][0] - pos[j][0]) + sq(pos[i][1] - pos[j][1]);
-            s += denWt_[size_t(j)] * std::exp(-0.5 * d2 / (sig * sig));
+            double d2 = sq(pos[size_t(i)][0] - pos[size_t(j)][0]) + sq(pos[size_t(i)][1] - pos[size_t(j)][1]);
+            sum += denWt_[size_t(j)] * std::exp(-0.5 * d2 / (sig * sig));
           }
         }
-      mx = std::max(mx, s);
+        mx = std::max(mx, sum);
+      }
+      densityMax = mx;
+      densityGridCell_ = cut; densityGridSigma_ = sig; densityGridValid_ = true;
     }
-    densityMax = mx;
-    cbd.denMax = float(mx);
+    cbd.denMax = float(densityMax);
     int dw = std::max(8, int(vp.w * 0.5f)), dh = std::max(8, int(vp.h * 0.5f));
     ensureDensityTarget(dw, dh);
     updateLut(S.densityScheme);
@@ -741,34 +879,53 @@ void NetView::renderGpu(const Color& bg) {
     c->OMSetRenderTargets(1, &drt, nullptr);
     D3D11_VIEWPORT dv{0, 0, float(denW_), float(denH_), 0, 1};
     c->RSSetViewports(1, &dv);
-    // splat instances: node buffer carries colour; weight goes into alpha
-    vector<NodeInst> sp;
+    // Splat instances are stable across camera-only redraws. Reuse a dynamic GPU buffer and upload only when
+    // displayed positions/visibility, weights or the per-cluster colour mode changes.
     bool byCl = cbd.byCluster > 0.5f;
-    for (int i = 0; i < net_->n(); i++) {
-      if (flags[i] & NF_HIDDEN) continue;
-      NodeInst s{};
-      s.x = pos[i][0]; s.y = pos[i][1];
-      Color col = byCl ? enc_.clusterColor(net_->nodes[i].cluster) : Color(1, 1, 1);
-      col.a = denWt_[size_t(i)];
-      setC(s.col, col);
-      sp.push_back(s);
+    if (!densitySplatValid_ || densitySplatByCluster_ != byCl) {
+      vector<NodeInst> sp;
+      sp.reserve(size_t(net_->n()));
+      for (int i = 0; i < net_->n(); i++) {
+        if (flags[size_t(i)] & NF_HIDDEN) continue;
+        NodeInst s{};
+        s.x = pos[size_t(i)][0]; s.y = pos[size_t(i)][1];
+        Color col = byCl ? enc_.clusterColor(net_->nodes[size_t(i)].cluster) : Color(1, 1, 1);
+        col.a = denWt_[size_t(i)];
+        setC(s.col, col);
+        sp.push_back(s);
+      }
+      if (sp.size() > size_t(splatCap_) || (!sp.empty() && !splatBuf_)) {
+        int cap = std::max(256, splatCap_);
+        while (size_t(cap) < sp.size()) cap = cap > (INT_MAX / 2) ? int(sp.size()) : cap * 2;
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth = UINT(size_t(cap) * sizeof(NodeInst));
+        bd.Usage = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        Com<ID3D11Buffer> grown;
+        if (SUCCEEDED(g_->dev->CreateBuffer(&bd, nullptr, grown.put()))) { splatBuf_ = grown; splatCap_ = cap; }
+      }
+      densitySplatValid_ = false;
+      nSplatInst_ = 0;
+      if (sp.empty()) { densitySplatByCluster_ = byCl; densitySplatValid_ = true; }
+      else if (splatBuf_ && sp.size() <= size_t(splatCap_)) {
+        D3D11_MAPPED_SUBRESOURCE sm{};
+        if (SUCCEEDED(c->Map(splatBuf_.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &sm))) {
+          memcpy(sm.pData, sp.data(), sp.size() * sizeof(NodeInst));
+          c->Unmap(splatBuf_.get(), 0);
+          nSplatInst_ = int(sp.size()); densitySplatByCluster_ = byCl; densitySplatValid_ = true;
+        }
+      }
     }
-    Com<ID3D11Buffer> sb;
-    if (!sp.empty()) {
-      D3D11_BUFFER_DESC bd{};
-      bd.ByteWidth = UINT(sp.size() * sizeof(NodeInst));
-      bd.Usage = D3D11_USAGE_IMMUTABLE;
-      bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-      D3D11_SUBRESOURCE_DATA sd{sp.data(), 0, 0};
-      g_->dev->CreateBuffer(&bd, &sd, sb.put());
+    if (densitySplatValid_ && nSplatInst_ > 0 && splatBuf_) {
       UINT stride = sizeof(NodeInst), off = 0;
-      ID3D11Buffer* vb = sb.get();
+      ID3D11Buffer* vb = splatBuf_.get();
       c->IASetVertexBuffers(0, 1, &vb, &stride, &off);
       c->IASetInputLayout(ilNode_.get());
       c->VSSetShader(vsSplat_.get(), nullptr, 0);
       c->PSSetShader(psSplat_.get(), nullptr, 0);
       c->OMSetBlendState(blendAdd_.get(), bf, 0xffffffff);
-      c->DrawInstanced(6, UINT(sp.size()), 0, 0);
+      c->DrawInstanced(6, UINT(nSplatInst_), 0, 0);
     }
     c->OMSetRenderTargets(1, &prev, nullptr);
     if (prev) prev->Release();
@@ -810,7 +967,9 @@ void NetView::renderGpu(const Color& bg) {
     c->PSSetShader(psLink_.get(), nullptr, 0);
     ID3D11ShaderResourceView* srv = nullptr;
     c->VSSetShaderResources(0, 1, &srv);
-    int segs = 14;
+    // The vertex shader needs one quad for straight/unbundled or already-segmented bundle links.
+    // Submitting 14 quads and discarding 13 in the shader multiplied 3D link vertex work by 14x.
+    int segs = bundleStride_ > 0 || cbd.curvature <= 0.001f ? 1 : 14;
     c->DrawInstanced(UINT(segs * 6), UINT(nLinkInst_), 0, 0);
     ID3D11ShaderResourceView* nul = nullptr;
     c->VSSetShaderResources(0, 1, &nul);
@@ -853,15 +1012,18 @@ void NetView::drawOverlay(ID2D1DeviceContext* dc, const Theme& th, bool showLabe
   double zRel = std::max(1e-9, cam.zoom / std::max(1e-9, fitZoom_));
   // hulls
   if (S.hulls && (kind == ViewKind::Network || kind == ViewKind::Density)) {
+    vector<vector<P2>> pointsByCluster(size_t(std::max(0, N.nClusters)));
+    for (int i = 0; i < N.n(); i++) {
+      int c = N.nodes[size_t(i)].cluster;
+      if (c < 0 || c >= N.nClusters || (flags[size_t(i)] & NF_HIDDEN)) continue;
+      float sx, sy;
+      if (!worldToScreen(pos[size_t(i)][0], pos[size_t(i)][1], pos[size_t(i)][2], sx, sy)) continue;
+      double r = nodeRadiusPx(i) + 12 * uiScale;
+      vector<P2>& pts = pointsByCluster[size_t(c)];
+      for (int a = 0; a < 8; a++) pts.push_back({sx + r * std::cos(a * M_PI / 4), sy + r * std::sin(a * M_PI / 4)});
+    }
     for (int c = 0; c < N.nClusters; c++) {
-      vector<P2> pts;
-      for (int i = 0; i < N.n(); i++) {
-        if (N.nodes[i].cluster != c || (flags[i] & NF_HIDDEN)) continue;
-        float sx, sy;
-        if (!worldToScreen(pos[i][0], pos[i][1], pos[i][2], sx, sy)) continue;
-        double r = nodeRadiusPx(i) + 12 * uiScale;
-        for (int a = 0; a < 8; a++) pts.push_back({sx + r * std::cos(a * M_PI / 4), sy + r * std::sin(a * M_PI / 4)});
-      }
+      vector<P2>& pts = pointsByCluster[size_t(c)];
       if (pts.size() < 24) continue;
       auto hull = convexHull(pts);
       if (hull.size() < 3) continue;
@@ -886,11 +1048,37 @@ void NetView::drawOverlay(ID2D1DeviceContext* dc, const Theme& th, bool showLabe
       capHulls.push_back(std::move(ch));
     }
   }
-  // labels
+  // Labels are arbitrated by exact rectangle intersection, but candidate rectangles come only from overlapping
+  // screen-grid cells instead of scanning every previously placed label (quadratic at high label counts).
   vector<Rect> placed;
+  vector<uint32_t> placedSeen;
+  std::unordered_map<uint64_t, vector<size_t>> placedGrid;
+  const float labelCell = std::max(32.f, 64.f * std::max(1.f, uiScale));
+  uint32_t labelQuery = 0;
+  auto labelCells = [&](const Rect& R, int64_t& x0, int64_t& y0, int64_t& x1, int64_t& y1) {
+    x0 = cellCoord(R.x, labelCell); y0 = cellCoord(R.y, labelCell);
+    x1 = cellCoord(R.r(), labelCell); y1 = cellCoord(R.b(), labelCell);
+  };
   auto hitsAny = [&](const Rect& R) {
-    for (auto& o : placed) if (R.x < o.r() && R.r() > o.x && R.y < o.b() && R.b() > o.y) return true;
+    int64_t x0, y0, x1, y1; labelCells(R, x0, y0, x1, y1);
+    if (++labelQuery == 0) { std::fill(placedSeen.begin(), placedSeen.end(), 0); labelQuery = 1; }
+    for (int64_t y = y0; y <= y1; y++) for (int64_t x = x0; x <= x1; x++) {
+      auto it = placedGrid.find(cellKey(x, y));
+      if (it == placedGrid.end()) continue;
+      for (size_t i : it->second) {
+        if (i >= placed.size() || placedSeen[i] == labelQuery) continue;
+        placedSeen[i] = labelQuery;
+        const Rect& o = placed[i];
+        if (R.x < o.r() && R.r() > o.x && R.y < o.b() && R.b() > o.y) return true;
+      }
+    }
     return false;
+  };
+  auto place = [&](const Rect& R) {
+    size_t i = placed.size();
+    placed.push_back(R); placedSeen.push_back(0);
+    int64_t x0, y0, x1, y1; labelCells(R, x0, y0, x1, y1);
+    for (int64_t y = y0; y <= y1; y++) for (int64_t x = x0; x <= x1; x++) placedGrid[cellKey(x, y)].push_back(i);
   };
   // cluster names first (fade out when zoomed in)
   float namesA = S.clusterNames ? float(clampv(1.0 - (zRel - 1.1) / 1.4, 0.0, 1.0)) : 0.f;
@@ -933,7 +1121,7 @@ void NetView::drawOverlay(ID2D1DeviceContext* dc, const Theme& th, bool showLabe
         cl.halo = true; cl.haloC = th.halo.withA(0.75f * namesA); cl.haloR = 2.2f * uiScale;
         capLabels.push_back(std::move(cl));
       }
-      if (namesA > 0.5f) placed.push_back({x, y, tm.width, tm.height});
+      if (namesA > 0.5f) place({x, y, tm.width, tm.height});
     }
   }
   if (showLabels && S.maxLabels >= 0) {
@@ -982,7 +1170,7 @@ void NetView::drawOverlay(ID2D1DeviceContext* dc, const Theme& th, bool showLabe
       for (auto& cd : cands) {
         Rect R{cd.x - 3 * uiScale, cd.y + thh * 0.02f, tw + 6 * uiScale, thh * 0.96f};
         if (!forced && (R.x < vp.x || R.y < vp.y || R.r() > vp.r() || R.b() > vp.b())) continue;
-        if (forced || !hitsAny(R)) { pick = &cd; placed.push_back(R); break; }
+        if (forced || !hitsAny(R)) { pick = &cd; place(R); break; }
       }
       if (!pick) continue;
       labelsShown++;

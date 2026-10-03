@@ -37,10 +37,14 @@ string nowStamp() {
 void App::aiSyncTurns() {
   if (aiTurnsOf == P.get()) return;
   if (aiLive) aiStop();
-  // another project: the agent's run and its undo snapshot belong to the previous one
-  if (agent.req) agent.req->cancel = true;
-  agent = AgentRun();
-  agentUndo = AgentUndo();
+  // another project: the agent's run and its undo snapshot belong to the previous one — unless a tool of the run
+  // (load_data, run_commands) opened it on purpose: then the run continues and only the undo snapshot is dropped
+  bool ownAction = agent.active && (agent.waitCmds || agent.waitJob);
+  if (!ownAction) {
+    if (agent.req) agent.req->cancel = true;
+    agent = AgentRun();
+  }
+  agentUndos.clear();
   aiTurns = ai::turnsFromJson(P->assistant);
   aiTurnsOf = P.get();
   aiLayout_.clear();
@@ -326,6 +330,7 @@ bool App::aiApplyClean(const string& reply) {
     VariantGroup g;
     g.ai = true;
     g.note = p.reason;
+    g.score = p.confidence > 0 ? p.confidence : 0.75;
     g.reason = p.kind == "abbreviation" ? "abbrev." : p.kind;
     auto tt = have.find(thesaurusKey(u, p.target));
     if (p.ignore) {
@@ -359,6 +364,7 @@ bool App::aiApplyClean(const string& reply) {
   vector<VariantGroup> rules = findVariants(P->corpus, u, P->engine.thesaurus);
   variants = ai;
   variants.insert(variants.end(), rules.begin(), rules.end());
+  rankVariants(variants);  // AI block first, ranked by its confidence; then the rules by certainty
   variantsScanned = true;
   cleanAiUnit = cleanUnit;
   cleanEdit = -1;
@@ -733,7 +739,7 @@ void App::drawAssistant(const Rect& R) {
             if (act("file", "Open Report", true)) openUrl(agentReportPath);
             if (act("folder", "Show in Folder")) revealInExplorer(agentReportPath);
           }
-          if (task == "agent" && agentUndo.valid && agentUndo.turn == int(i) && act("undo", "Undo Agent Changes")) agentUndoChanges();
+          if (task == "agent" && agentUndoTurn() == int(i) && act("undo", "Undo Last Change")) agentUndoChanges();
           if (task == "clean" && hasCorpus() && act("text", "Review in Data", true)) { aiApplyClean(T.text); page = PG_DATA; }
           if (act("copy", "Copy")) { setClipboardText(hwnd, replaceAll(structured ? shownText : T.text, "\n", "\r\n")); ui.toast("Copied", "", 1, 1.5); }
           if (i + 1 == aiTurns.size() && i >= 1 && aiTurns[i - 1].role == "user" && !aiLive && act("refresh", "Regenerate")) {
@@ -743,7 +749,7 @@ void App::drawAssistant(const Rect& R) {
             aiTurns.erase(aiTurns.begin() + long(i - 1), aiTurns.end());
             aiLayout_.clear();
             if (tsk == "agent") {
-              if (agentUndo.turn >= int(i) - 1) agentUndo.turn = -2;  // keeps the undo, detached from the erased turn
+              for (auto& u : agentUndos) if (u.turn >= int(i) - 1) u.turn = -2;  // keeps the undo, detached from the erased turn
               ui.popId();
               ui.endScroll(y - yStart + 60 * s);
               ui.popId();
@@ -809,7 +815,7 @@ void App::drawAssistant(const Rect& R) {
       chx += 12 * s;
     }
     if (agentMode) {
-      ui.text({chx, y2, cx + colW - chx, 22 * s}, agent.active ? (agent.waitApproval ? "Waiting for your approval" : agent.waitJob ? "Waiting for a task to finish\xE2\x80\xA6" : "Working\xE2\x80\xA6") : agentAuto() ? "Works on its own: searches, builds maps and writes reports." : "Uses the app's tools. Asks before changing anything.", 11.5f * s, ui.c.textFaint);
+      ui.text({chx, y2, cx + colW - chx, 22 * s}, agent.active ? (agent.live ? "The Live AI session is using a tool\xE2\x80\xA6" : agent.waitApproval ? "Waiting for your approval" : agent.waitJob ? "Waiting for a task to finish\xE2\x80\xA6" : "Working\xE2\x80\xA6") : agentAuto() ? "Works on its own: searches, builds maps and writes reports." : "Uses the app's tools. Asks before changing anything.", 11.5f * s, ui.c.textFaint);
       if (agent.active) ui.animating = agent.req != nullptr;
     }
     if (!agentMode) {
@@ -912,7 +918,7 @@ void App::pageAssistant(Lay& L) {
     ui.stroke(box, ui.c.border, 8 * s);
     ui.icon("agent", box.x + 20 * s, box.y + 22 * s, 15 * s, ready ? ui.c.accent : ui.c.textFaint, 1.7f);
     string st = !ready ? "Connect an AI provider to use the agent" : agent.active ? (agent.waitApproval ? "Waiting for your approval" : agent.waitJob ? (agent.jobTool == "search_openalex" ? "Searching OpenAlex\xE2\x80\xA6" : "Building the map\xE2\x80\xA6") : "Working\xE2\x80\xA6")
-              : agentUndo.valid ? "Finished. Its changes can be undone." : "Ready";
+              : !agentUndos.empty() ? "Finished. " + plural(long(agentUndos.size()), "change") + " can be undone, newest first." : "Ready";
     ui.text({box.x + 40 * s, box.y + 12 * s, box.w - 50 * s, 20 * s}, st, 12.5f * s, ready ? ui.c.text : ui.c.textFaint, AL_LEFT, 550);
     if (agent.active) ui.text({box.x + 40 * s, box.y + 32 * s, box.w - 50 * s, 16 * s}, "Step " + std::to_string(agent.steps) + " of at most " + std::to_string(ai::kAgentMaxSteps) + (agent.changes ? " \xC2\xB7 " + plural(agent.changes, "change") : string()), 11 * s, ui.c.textDim);
     {
@@ -928,9 +934,19 @@ void App::pageAssistant(Lay& L) {
     }
     if (!agentReportPath.empty() && !agent.active) {
       Rect r = L.row(28 * s);
-      auto c3 = cols(r, 2, 8 * s);
+      bool word = !agentReportDocx.empty() && agentReportDocx != agentReportPath;
+      auto c3 = cols(r, word ? 3 : 2, 8 * s);
       if (ui.button(c3[0], "Open Report", BTN_NORMAL, "file")) openUrl(agentReportPath);
-      if (ui.button(c3[1], "Show in Folder", BTN_NORMAL, "folder")) revealInExplorer(agentReportPath);
+      if (word && ui.button(c3[1], "Open Word", BTN_NORMAL, "file")) openUrl(agentReportDocx);
+      if (ui.button(c3[word ? 2 : 1], "Show in Folder", BTN_NORMAL, "folder")) revealInExplorer(agentReportPath);
+    }
+    if (!wdoc.empty() && !agent.active) {
+      auto c3 = cols(L.row(28 * s), 3, 8 * s);
+      if (ui.button(c3[0], "Open in Writer", BTN_NORMAL, "writer")) openWriter();
+      ui.tip("The report lives in the writer: " + writerSummary() + ". Edit it there and export it as PDF, Word or HTML");
+      if (ui.button(c3[1], "Save as Word\xE2\x80\xA6", BTN_NORMAL, "download")) cmdSaveReport("docx");
+      ui.tip("Writes the document as an editable .docx with headings, tables, figures and references");
+      if (ui.button(c3[2], "Save as PDF\xE2\x80\xA6", BTN_NORMAL, "download")) cmdSaveReport("pdf");
     }
     auto c2 = cols(L.row(28 * s), 2, 8 * s);
     if (agent.active) {
@@ -938,7 +954,8 @@ void App::pageAssistant(Lay& L) {
       if (ui.button(c2[1], "Stop", BTN_NORMAL)) agentStop();
     } else {
       if (ui.button(c2[0], "New Goal\xE2\x80\xA6", BTN_PRIMARY, "", ready && !aiLive)) { agentMode = true; aiPending = Task::Chat; s_aiFocusInput = true; }
-      if (ui.button(c2[1], "Undo Changes", BTN_NORMAL, "", agentUndo.valid)) agentUndoChanges();
+      if (ui.button(c2[1], agentUndos.empty() ? "Undo Change" : "Undo: " + truncate(agentUndos.back().label, 22), BTN_NORMAL, "", !agentUndos.empty())) agentUndoChanges();
+      if (!agentUndos.empty()) ui.tip("Takes back the newest change (" + agentUndos.back().label + "). " + plural(long(agentUndos.size()), "change") + " can be undone, one at a time.");
     }
   }
   // tools
@@ -1007,6 +1024,13 @@ void App::openSettings() {
     setAiModel[p] = settings.j["aiModel" + std::to_string(p)].str();
   }
   setAiBase = settings.j["aiBase"].str();
+  setLiveModel = settings.j["liveModel"].str();
+  setLiveVoice = settings.j["liveVoice"].str("Puck");
+  setLiveThinking = settings.j["liveThinking"].str("low");
+  setLiveBarge = settings.j["liveBargeIn"].boolean(false);
+  setLiveVad = settings.j["liveClientVad"].boolean(true);
+  setLiveSearch = settings.j["liveSearch"].boolean(true);
+  setLiveAuto = settings.j["liveAuto"].boolean(true);
   aiProbe.reset();
   paletteOpen = false;
   ui.openModal("settings");
@@ -1027,7 +1051,7 @@ void App::drawSettings() {
     float x = d.x + 28 * s, cw = d.w - 56 * s, y = d.y + 18 * s;
     ui.text({x, y, cw, 26 * s}, "Settings", 15 * s, ui.c.text, AL_CENTER, 650);
     y += 36 * s;
-    ui.segmented({d.x + d.w / 2 - 150 * s, y, 300 * s, 28 * s}, {"General", "OpenAlex", "AI Assistant"}, setTab, "set:tab");
+    ui.segmented({d.x + d.w / 2 - 190 * s, y, 380 * s, 28 * s}, {"General", "OpenAlex", "AI Assistant", "Live AI"}, setTab, "set:tab");
     y += 46 * s;
     auto label = [&](const string& t) { ui.text({x, y, cw, 18 * s}, t, 12.5f * s, ui.c.text, AL_LEFT, 550); y += 22 * s; };
     auto note = [&](const string& t) { float th = ui.textWrap({x, y, cw, 80 * s}, t, 11.5f * s, ui.c.textDim); y += th + 8 * s; };
@@ -1043,21 +1067,78 @@ void App::drawSettings() {
     };
     if (setTab == 0) {
       label("Appearance");
-      int th2 = ui.dark ? 1 : 0;
+      int th2 = themeTarget() ? 1 : 0;
       if (ui.segmented({x, y, 200 * s, 30 * s}, {"Light", "Dark"}, th2, "set:theme")) setTheme(th2 == 1);
       y += 44 * s;
       note("The map canvas follows its own look (Look page). The VOSviewer look keeps a white canvas in both themes.");
+      y += 6 * s;
+      label("Writer and Microsoft Word");
+      {
+        bool v = writerWordSources_;
+        if (ui.toggle({x, y, cw, 26 * s}, "When I copy text with citations, add their sources to the document open in Word", v) && v != writerWordSources_) {
+          writerWordSources_ = v;
+          settings.j.set("writerWordSources", v);
+          settings.save();
+        }
+        y += 30 * s;
+      }
+      note("A paste in Word then gives citations Word owns: References > Manage Sources lists them, Bibliography inserts the list, Style restyles them. Paste into Word (Ctrl+Shift+C) does the same and pastes at Word's cursor.");
     } else if (setTab == 1) {
       label("OpenAlex API key");
       ui.maskNext = true;
       ui.textInput({x, y, cw, 32 * s}, "set:key", setKey, "Paste your key");
       y += 38 * s;
-      note("Needed for semantic search and recommended for all OpenAlex requests. Keys are free and include about 1,000 searches a day.");
+      note("Needed for semantic search and recommended for all OpenAlex requests. Keys are free and include about 1,000 searches a day \xE2\x80\x94 and about 100 open-access PDFs a day from OpenAlex's own copies (Read \xE2\x80\xBA Get PDFs), which the publishers' sites often refuse to hand out without one.");
       link("Get a free key", "https://openalex.org/settings/api");
       y += 6 * s;
       label("Contact email (optional)");
       ui.textInput({x, y, cw, 32 * s}, "set:mail", setEmail, "name@example.org");
       y += 40 * s;
+    } else if (setTab == 3) {
+      label("Google Gemini API key");
+      ui.maskNext = true;
+      ui.textInput({x, y, cw, 32 * s}, "set:aikey1", setAiKey[1], "Paste your key");
+      y += 38 * s;
+      note("A real-time voice and text session with the Gemini Live API (same key as the AI Assistant's Google Gemini provider). Low thinking answers fastest; higher levels reason longer before acting.");
+      link("Get a key", "https://aistudio.google.com/apikey");
+      y += 4 * s;
+      label("Model");
+      {
+        vector<string> opts = {string(live::kDefaultModel), "gemini-3.8-live"};
+        Rect mr{x, y, cw - 36 * s, 30 * s};
+        ui.textInput(mr, "set:livemodel", setLiveModel, string(live::kDefaultModel) + " (default)");
+        int pick = -1;
+        for (size_t k = 0; k < opts.size(); k++) if (opts[k] == trim(setLiveModel)) pick = int(k);
+        int before = pick;
+        ui.combo({mr.r() + 6 * s, y, 30 * s, 30 * s}, "set:livemodelpick", opts, pick);
+        if (pick != before && pick >= 0) setLiveModel = opts[size_t(pick)];
+        y += 38 * s;
+      }
+      {
+        float half = (cw - 16 * s) / 2;
+        ui.text({x, y, half, 18 * s}, "Voice", 12.5f * s, ui.c.text, AL_LEFT, 550);
+        ui.text({x + half + 16 * s, y, half, 18 * s}, "Thinking (Extended Thinking models)", 12.5f * s, ui.c.text, AL_LEFT, 550);
+        y += 22 * s;
+        int vi = 0;
+        const auto& vs = live::voices();
+        for (size_t k = 0; k < vs.size(); k++) if (vs[k] == setLiveVoice) vi = int(k);
+        if (ui.combo({x, y, half, 30 * s}, "set:livevoice", vs, vi)) setLiveVoice = vs[size_t(vi)];
+        int ti = 0;
+        const auto& lv = live::thinkingLevels();
+        for (size_t k = 0; k < lv.size(); k++) if (lv[k] == setLiveThinking) ti = int(k);
+        if (ui.segmented({x + half + 16 * s, y, half, 30 * s}, {"Low", "Medium", "High"}, ti, "set:livethink")) setLiveThinking = lv[size_t(ti)];
+        y += 40 * s;
+      }
+      {
+        float half = (cw - 16 * s) / 2;
+        ui.toggle({x, y, half, 26 * s}, "The app detects when I stop talking", setLiveVad);
+        ui.toggle({x + half + 16 * s, y, half, 26 * s}, "Let me interrupt it by talking", setLiveBarge);
+        y += 32 * s;
+        ui.toggle({x, y, half, 26 * s}, "Google Search grounding", setLiveSearch);
+        ui.toggle({x + half + 16 * s, y, half, 26 * s}, "Acts on its own, without asking", setLiveAuto);
+        y += 32 * s;
+      }
+      note("Hover a label for details. Detection in the app is recommended: the server's own often leaves a question unanswered. Interrupting by any sound needs headphones; with it off, speaking up clearly still interrupts.");
     } else {
       label("Provider");
       int prov = setAiProv;
@@ -1152,6 +1233,13 @@ void App::drawSettings() {
         settings.j.set("aiModel" + std::to_string(p), trim(setAiModel[p]));
       }
       settings.j.set("aiBase", trim(setAiBase));
+      settings.j.set("liveModel", trim(setLiveModel));
+      settings.j.set("liveVoice", setLiveVoice);
+      settings.j.set("liveThinking", setLiveThinking);
+      settings.j.set("liveBargeIn", setLiveBarge);
+      settings.j.set("liveClientVad", setLiveVad);
+      settings.j.set("liveSearch", setLiveSearch);
+      settings.j.set("liveAuto", setLiveAuto);
       settings.save();
       aiCfgValid_ = false;
       ui.focus = 0;
