@@ -5,6 +5,7 @@
 
 #include "algo.h"
 #include "analysis.h"
+#include "figure.h"
 #include "insights.h"
 #include "model.h"
 
@@ -33,6 +34,20 @@ struct PeriodDiff {
 // Share of each map item in two periods, from the records behind the item (Node::recs) and their years.
 // The ratio uses additive smoothing ((b+0.5)/nB) / ((a+0.5)/nA); growing / fading means a change of at least 1.5x.
 PeriodDiff periodDiff(const Network& net, const Corpus& c, int a0, int a1, int b0, int b1, int minDocs = 2);
+// The same comparison for any two record subsets (masks over c.recs): two source files, two queries, two periods.
+PeriodDiff subsetDiff(const Network& net, const Corpus& c, const vector<char>& inA, const vector<char>& inB, int minDocs = 2);
+// Records that came from source file `file` (provenance bits); all records when provenance is unknown
+vector<char> fileMask(const Corpus& c, size_t file);
+vector<char> yearMask(const Corpus& c, int y0, int y1);
+
+// ---------------------------------------------------------------- side-by-side comparison figure
+// Two network panels of the same layout: node areas follow the item's share of documents in A (left) and in B (right)
+// on one common scale, items absent from a side are faded, cluster colours and positions stay put so the eye can compare.
+// a/b: per-node document counts (or weights), nA/nB: totals the shares are taken from (0 = use the counts as they are).
+// W x H is the requested size in points; the returned scene keeps the aspect the panels needed.
+Scene compareSideBySide(const Network& net, const ViewStyle& st, const FigureSpec& spec, const Bundles* bundles, const string& methodsShort,
+                        const vector<double>& a, const vector<double>& b, double nA, double nB, const string& titleA, const string& titleB,
+                        double W, double H);
 // split of the corpus years into two halves of about the same number of documents
 void suggestPeriods(const Corpus& c, int& a0, int& a1, int& b0, int& b1);
 

@@ -8,6 +8,7 @@
 #include <unordered_set>
 
 #include "common.h"
+#include "report.h"
 
 namespace vs {
 
@@ -40,18 +41,27 @@ void suggestPeriods(const Corpus& c, int& a0, int& a1, int& b0, int& b1) {
   b0 = a1 + 1;
 }
 
-PeriodDiff periodDiff(const Network& net, const Corpus& c, int a0, int a1, int b0, int b1, int minDocs) {
+vector<char> yearMask(const Corpus& c, int y0, int y1) {
+  if (y0 > y1) std::swap(y0, y1);
+  vector<char> m(c.recs.size(), 0);
+  for (size_t i = 0; i < c.recs.size(); i++) { int y = c.recs[i].year; m[i] = y && y >= y0 && y <= y1; }
+  return m;
+}
+
+vector<char> fileMask(const Corpus& c, size_t file) {
+  vector<char> m(c.recs.size(), 0);
+  bool prov = c.provenanceKnown();
+  for (size_t i = 0; i < c.recs.size(); i++) m[i] = !prov || file >= 64 || (c.recs[i].src & (1ull << file)) != 0;
+  return m;
+}
+
+PeriodDiff subsetDiff(const Network& net, const Corpus& c, const vector<char>& inA, const vector<char>& inB, int minDocs) {
   PeriodDiff D;
-  D.a0 = a0; D.a1 = a1; D.b0 = b0; D.b1 = b1;
-  if (a0 > a1) std::swap(a0, a1);
-  if (b0 > b1) std::swap(b0, b1);
-  auto inA = [&](int y) { return y && y >= a0 && y <= a1; };
-  auto inB = [&](int y) { return y && y >= b0 && y <= b1; };
-  for (auto& r : c.recs) { if (inA(r.year)) D.nA++; if (inB(r.year)) D.nB++; }
+  for (size_t i = 0; i < c.recs.size(); i++) { if (i < inA.size() && inA[i]) D.nA++; if (i < inB.size() && inB[i]) D.nB++; }
   bool anyRecs = false;
   for (auto& nd : net.nodes) if (!nd.recs.empty()) { anyRecs = true; break; }
-  if (!anyRecs) { D.error = "This map was not built from records, so its items have no years."; return D; }
-  if (!D.nA || !D.nB) { D.error = "One of the periods has no documents."; return D; }
+  if (!anyRecs) { D.error = "This map was not built from records, so its items cannot be compared by documents."; return D; }
+  if (!D.nA || !D.nB) { D.error = "One of the two sides has no documents."; return D; }
   const double up = std::log2(1.5);
   D.items.resize(net.nodes.size());
   for (size_t i = 0; i < net.nodes.size(); i++) {
@@ -59,9 +69,8 @@ PeriodDiff periodDiff(const Network& net, const Corpus& c, int a0, int a1, int b
     it.node = int(i);
     for (int r : net.nodes[i].recs) {
       if (r < 0 || size_t(r) >= c.recs.size()) continue;
-      int y = c.recs[size_t(r)].year;
-      if (inA(y)) it.a++;
-      if (inB(y)) it.b++;
+      if (size_t(r) < inA.size() && inA[size_t(r)]) it.a++;
+      if (size_t(r) < inB.size() && inB[size_t(r)]) it.b++;
     }
     it.shareA = double(it.a) / D.nA;
     it.shareB = double(it.b) / D.nB;
@@ -75,6 +84,87 @@ PeriodDiff periodDiff(const Network& net, const Corpus& c, int a0, int a1, int b
   }
   D.ok = true;
   return D;
+}
+
+PeriodDiff periodDiff(const Network& net, const Corpus& c, int a0, int a1, int b0, int b1, int minDocs) {
+  PeriodDiff D = subsetDiff(net, c, yearMask(c, a0, a1), yearMask(c, b0, b1), minDocs);
+  D.a0 = a0; D.a1 = a1; D.b0 = b0; D.b1 = b1;
+  if (!D.ok && D.error.find("no documents") != string::npos) D.error = "One of the periods has no documents.";
+  if (!D.ok && D.error.find("cannot be compared") != string::npos) D.error = "This map was not built from records, so its items have no years.";
+  return D;
+}
+
+Scene compareSideBySide(const Network& net, const ViewStyle& st, const FigureSpec& spec, const Bundles* bundles, const string& methodsShort,
+                        const vector<double>& a, const vector<double>& b, double nA, double nB, const string& titleA, const string& titleB,
+                        double W, double H) {
+  Scene out;
+  int n = net.n();
+  if (n == 0 || int(a.size()) < n || int(b.size()) < n) return out;
+  // shares on one common scale
+  vector<double> sa((size_t(n))), sb((size_t(n)));
+  double maxS = 0;
+  for (int i = 0; i < n; i++) {
+    sa[size_t(i)] = nA > 0 ? a[size_t(i)] / nA : a[size_t(i)];
+    sb[size_t(i)] = nB > 0 ? b[size_t(i)] / nB : b[size_t(i)];
+    maxS = std::max({maxS, sa[size_t(i)], sb[size_t(i)]});
+  }
+  if (maxS <= 0) maxS = 1;
+  Encoder enc;
+  enc.prepare(net, st);
+  double rMax = 0;
+  for (int i = 0; i < n; i++) rMax = std::max(rMax, enc.radius(i));
+  if (rMax <= 0) rMax = 1;
+  auto panel = [&](const vector<double>& sh) {
+    FigPanelDef d;
+    d.kind = ViewKind::Network;
+    d.rMul.resize(size_t(n));
+    d.fade.resize(size_t(n));
+    for (int i = 0; i < n; i++) {
+      double r0 = std::max(1e-6, enc.radius(i));
+      double want = rMax * std::sqrt(sh[size_t(i)] / maxS);  // area proportional to the share
+      bool absent = sh[size_t(i)] <= 0;
+      d.rMul[size_t(i)] = float(absent ? std::max(0.12, 0.25 * rMax / r0 * 0.5) : std::max(0.15, want / r0));
+      d.fade[size_t(i)] = absent ? 0.82f : 0.f;
+    }
+    return d;
+  };
+  FigureSpec sp = spec;
+  sp.panelNetwork = true;
+  sp.panelOverlay = sp.panelDensity = sp.panelTimeline = sp.panelGeo = sp.panel3D = sp.panelMatrix = false;
+  sp.letters = false;
+  sp.sizeLegend = false;  // sizes are shares on a common scale, not the map's weights
+  sp.footer = false;
+  sp.pdfPages = false;
+  sp.transparent = false;
+  sp.caption.clear();
+  double halfW = std::max(120.0, W / 2 - 6), hh = std::max(90.0, H);
+  sp.wmm = 170;
+  sp.hmm = clampv(170 * hh / halfW, 90.0, 260.0);
+  FigureSpec spA = sp, spB = sp;
+  spA.title = titleA;
+  spB.title = titleB;
+  spB.legend = false;  // one cluster legend is enough
+  vector<FigPanelDef> defsA{panel(sa)}, defsB{panel(sb)};
+  Scene A = buildFigure(net, st, spA, bundles, methodsShort, &defsA);
+  Scene B = buildFigure(net, st, spB, bundles, methodsShort, &defsB);
+  double k = A.W > 0 ? halfW / A.W : 1;
+  out.W = W;
+  out.H = std::max(A.H, B.H) * k;
+  appendScene(out, A, 0, 0, k);
+  appendScene(out, B, W / 2 + 6, 0, k);
+  Prim div;
+  div.type = Prim::Rect;
+  div.x = float(W / 2 - 0.5);
+  div.y = float(out.H * 0.06);
+  div.w = 1;
+  div.h = float(out.H * 0.88);
+  div.fill = true;
+  div.fillC = Color(0.5f, 0.5f, 0.55f, 0.35f);
+  div.group = "legend";
+  out.items.push_back(div);
+  out.warnings.insert(out.warnings.end(), A.warnings.begin(), A.warnings.end());
+  out.labels = A.labels + B.labels;
+  return out;
 }
 
 // ================================================================= main path

@@ -1,0 +1,2150 @@
+{
+ "when": "2026-09-30T03:59:37Z",
+ "mail": "oa-probe-test@gmail.com",
+ "services": {
+  "unpaywall: no e-mail": {
+   "status": 422,
+   "note": "{     \"HTTP_status_code\": 422,     \"error\": true,     \"message\": \"Email address required in API call, see http://unpaywall.org/products/api\" }"
+  },
+  "unpaywall: syntactically odd e-mail": {
+   "status": 200,
+   "note": "{\"best_oa_location\":{\"endpoint_id\":null,\"evidence\":\"deprecated\",\"host_type\":\"publisher\",\"is_best\":true,\"license\":\"public-domain\",\"oa_date\":\"2016-11-17\",\"pmh_id\""
+  },
+  "unpaywall: unregistered e-mail (.invalid TLD)": {
+   "status": 200,
+   "note": "{\"best_oa_location\":{\"endpoint_id\":null,\"evidence\":\"deprecated\",\"host_type\":\"publisher\",\"is_best\":true,\"license\":\"public-domain\",\"oa_date\":\"2016-11-17\",\"pmh_id\""
+  },
+  "unpaywall: unregistered ordinary e-mail": {
+   "status": 200,
+   "note": "{\"best_oa_location\":{\"endpoint_id\":null,\"evidence\":\"deprecated\",\"host_type\":\"publisher\",\"is_best\":true,\"license\":\"public-domain\",\"oa_date\":\"2016-11-17\",\"pmh_id\""
+  },
+  "openalex: no mailto": {
+   "status": 200,
+   "note": "ok"
+  },
+  "openalex: unregistered mailto": {
+   "status": 200,
+   "note": "ok"
+  },
+  "semanticscholar: no key": {
+   "status": 200,
+   "note": "ok"
+  },
+  "semanticscholar: burst of 12 (no key)": {
+   "status": 200,
+   "note": "codes 200,200,200,200,200,200,200,200,200,200,200,200"
+  },
+  "core.ac.uk v3: no key": {
+   "status": 200,
+   "note": "{\"totalHits\":1,\"limit\":1,\"offset\":0,\"results\":[{\"acceptedDate\":\"\",\"arxivId\":null,\"authors\":[{\"name\":\"Howe, Adina\"},{\"nam"
+  },
+  "europepmc: no key": {
+   "status": 200,
+   "note": "ok"
+  },
+  "arxiv api: no key": {
+   "status": 0,
+   "note": "TimeoutError: The read operation timed out"
+  },
+  "crossref: no mailto": {
+   "status": 200,
+   "note": "ok"
+  }
+ },
+ "rows": [
+  {
+   "doi": "10.1016/j.joi.2017.08.007",
+   "label": "fixed: bibliometrix (Elsevier)",
+   "meta": {
+    "openalex_content_pdf": false,
+    "openalex": {
+     "is_oa": false,
+     "status": "closed",
+     "best_pdf": null,
+     "n_pdf_locations": 0
+    },
+    "unpaywall": {
+     "is_oa": false,
+     "status": "closed",
+     "best_pdf": null,
+     "n_locations": 0
+    },
+    "semanticscholar": {
+     "is_oa": false,
+     "pdf": "",
+     "arxiv": null,
+     "pmc": null
+    },
+    "europepmc": {
+     "found": false
+    }
+   },
+   "candidates": 0,
+   "attempts": [],
+   "got": null
+  },
+  {
+   "doi": "10.1007/s11192-009-0146-3",
+   "label": "fixed: VOSviewer (Springer)",
+   "meta": {
+    "openalex_content_pdf": true,
+    "openalex": {
+     "is_oa": true,
+     "status": "hybrid",
+     "best_pdf": "https://link.springer.com/content/pdf/10.1007/s11192-009-0146-3.pdf",
+     "n_pdf_locations": 1
+    },
+    "unpaywall": {
+     "is_oa": true,
+     "status": "hybrid",
+     "best_pdf": "https://link.springer.com/content/pdf/10.1007/s11192-009-0146-3.pdf",
+     "n_locations": 6
+    },
+    "semanticscholar": {
+     "is_oa": true,
+     "pdf": "https://link.springer.com/content/pdf/10.1007/s11192-009-0146-3.pdf",
+     "arxiv": null,
+     "pmc": "2883932"
+    },
+    "europepmc": {
+     "pmcid": "PMC2883932",
+     "isOpenAccess": "Y",
+     "inPMC": "Y",
+     "pdf_urls": [
+      "https://europepmc.org/articles/PMC2883932?pdf=render"
+     ]
+    }
+   },
+   "candidates": 3,
+   "attempts": [
+    {
+     "url": "https://link.springer.com/content/pdf/10.1007/s11192-009-0146-3.pdf",
+     "source": "openalex:best(Scientometrics)",
+     "app": "PDF",
+     "app_ms": 1025,
+     "app_bytes": 937111,
+     "app_final": "https://link.springer.com/content/pdf/10.1007/s11192-009-0146-3.pdf",
+     "app_chain": 2,
+     "version": "publishedVersion"
+    }
+   ],
+   "got": {
+    "source": "openalex:best(Scientometrics)",
+    "version": "publishedVersion",
+    "bytes": 937111,
+    "by": "app-ua"
+   }
+  },
+  {
+   "doi": "10.1371/journal.pone.0166578",
+   "label": "fixed: PLOS ONE",
+   "meta": {
+    "openalex_content_pdf": true,
+    "openalex": {
+     "is_oa": true,
+     "status": "gold",
+     "best_pdf": "https://journals.plos.org/plosone/article/file?id=10.1371/journal.pone.0166578&type=printable",
+     "n_pdf_locations": 2
+    },
+    "unpaywall": {
+     "is_oa": true,
+     "status": "gold",
+     "best_pdf": "https://journals.plos.org/plosone/article/file?id=10.1371/journal.pone.0166578&type=printable",
+     "n_locations": 4
+    },
+    "semanticscholar": {
+     "is_oa": true,
+     "pdf": "https://journals.plos.org/plosone/article/file?id=10.1371/journal.pone.0166578&type=printable",
+     "arxiv": null,
+     "pmc": "5113961"
+    },
+    "europepmc": {
+     "pmcid": "PMC5113961",
+     "isOpenAccess": "Y",
+     "inPMC": "Y",
+     "pdf_urls": [
+      "https://europepmc.org/articles/PMC5113961?pdf=render"
+     ]
+    }
+   },
+   "candidates": 4,
+   "attempts": [
+    {
+     "url": "https://journals.plos.org/plosone/article/file?id=10.1371/journal.pone.0166578&type=printable",
+     "source": "openalex:best(PLoS ONE)",
+     "app": "PDF",
+     "app_ms": 689,
+     "app_bytes": 1174873,
+     "app_final": "https://journals.plos.org/plosone/article/file?id=10.1371/journal.pone.0166578&type=printable",
+     "app_chain": 0,
+     "version": "publishedVersion"
+    }
+   ],
+   "got": {
+    "source": "openalex:best(PLoS ONE)",
+    "version": "publishedVersion",
+    "bytes": 1174873,
+    "by": "app-ua"
+   }
+  },
+  {
+   "doi": "10.1038/nature12373",
+   "label": "fixed: Nature bronze",
+   "meta": {
+    "openalex_content_pdf": true,
+    "openalex": {
+     "is_oa": true,
+     "status": "bronze",
+     "best_pdf": "https://www.nature.com/articles/nature12373.pdf",
+     "n_pdf_locations": 2
+    },
+    "unpaywall": {
+     "is_oa": true,
+     "status": "bronze",
+     "best_pdf": "https://www.nature.com/articles/nature12373.pdf",
+     "n_locations": 4
+    },
+    "semanticscholar": {
+     "is_oa": true,
+     "pdf": "https://www.nature.com/articles/nature12373.pdf",
+     "arxiv": "1304.1068",
+     "pmc": "4221854"
+    },
+    "europepmc": {
+     "pmcid": "PMC4221854",
+     "isOpenAccess": "N",
+     "inPMC": "Y",
+     "pdf_urls": [
+      "https://europepmc.org/articles/PMC4221854?pdf=render"
+     ]
+    }
+   },
+   "candidates": 4,
+   "attempts": [
+    {
+     "url": "https://www.nature.com/articles/nature12373.pdf",
+     "source": "openalex:best(Nature)",
+     "app": "login-page",
+     "app_ms": 1961,
+     "app_bytes": 334546,
+     "app_final": "https://www.nature.com/articles/nature12373",
+     "app_chain": 4,
+     "browser": "login-page",
+     "browser_bytes": 334546,
+     "version": "publishedVersion"
+    },
+    {
+     "url": "https://arxiv.org/pdf/1304.1068",
+     "source": "openalex:arXiv (Cornell University)",
+     "app": "PDF",
+     "app_ms": 99,
+     "app_bytes": 2419633,
+     "app_final": "https://arxiv.org/pdf/1304.1068",
+     "app_chain": 0,
+     "version": "submittedVersion"
+    }
+   ],
+   "got": {
+    "source": "openalex:arXiv (Cornell University)",
+    "version": "submittedVersion",
+    "bytes": 2419633,
+    "by": "app-ua"
+   }
+  },
+  {
+   "doi": "10.48550/arXiv.2303.08774",
+   "label": "fixed: arXiv DOI",
+   "meta": {
+    "openalex": {
+     "error": "HTTP 404"
+    },
+    "unpaywall": {
+     "error": "HTTP 404"
+    },
+    "semanticscholar": {
+     "error": "HTTP 404"
+    },
+    "europepmc": {
+     "found": false
+    }
+   },
+   "candidates": 0,
+   "attempts": [],
+   "got": null
+  },
+  {
+   "doi": "10.1162/qss_a_00019",
+   "label": "fixed: QSS (MIT Press)",
+   "meta": {
+    "openalex_content_pdf": true,
+    "openalex": {
+     "is_oa": true,
+     "status": "gold",
+     "best_pdf": "https://www.mitpressjournals.org/doi/pdf/10.1162/qss_a_00019",
+     "n_pdf_locations": 1
+    },
+    "unpaywall": {
+     "is_oa": true,
+     "status": "gold",
+     "best_pdf": "https://www.mitpressjournals.org/doi/pdf/10.1162/qss_a_00019",
+     "n_locations": 2
+    },
+    "semanticscholar": {
+     "is_oa": true,
+     "pdf": "https://www.mitpressjournals.org/doi/pdf/10.1162/qss_a_00019",
+     "arxiv": null,
+     "pmc": null
+    },
+    "europepmc": {
+     "found": false
+    }
+   },
+   "candidates": 1,
+   "attempts": [
+    {
+     "url": "https://www.mitpressjournals.org/doi/pdf/10.1162/qss_a_00019",
+     "source": "openalex:best(Quantitative Science Studies)",
+     "app": "PDF",
+     "app_ms": 1473,
+     "app_bytes": 477704,
+     "app_final": "https://watermark02.silverchair.com/qss_a_00019.pdf?token=AQECAHi208BE49Ooan9kkhW_Ercy7Dm3ZL_9Cf3qfKAc485ysgAAAkAwggI8BgkqhkiG9w0BBwagggItMIICKQIBADCCAiIGCSqGSIb3DQEHATAeBglghkgBZQMEAS4wEQQMAVC_Ib0sm70hGgjYAgEQgIIB80c9bqwfgnZMI5jvlUubyzhQ4k5j6ItKA4d21_Psmzq4XDfd1kDfOIX741Gy5W7sOiYuw395mY2Paef3Bc3kuLrQIf8eZDS5GDENNEPfZsbZgOyB8Y70obleVKCd0_ey97dsW89gjfS54MV5_dPEOkw-K7lD6cF7destMClm_p3FUSqzTyXYkTO4StyzfdIR8ifH1Vl2xokzP4nKeZzWAf9DvbXpQfxHmrLK-i1qBhNfei_IHg8aW4KuKz-9mkM98BUjY4rfs5xuwLTjUg6tLvtMB18qzHHIXqByzG0Xb9hQaeHKtcZCUOy_aoD0etTPNfFTKUSzZE-5l46Qy-O69OW7Aw6d4g8QIegaewBPN8NAHVcoHMUT2QFoFDUympXowjyhg4FhdYRw_XmM7_vF1dSKoErT9S4BupFsH-W7JR9QeIZyi4QgTfEO5WohtWLWSWMJ4uGYcgNPXzx7UAz6JhIs47MuYz_KOf0OBax4C_q0w-dTYekwpSK-jNsn838VEIhBC94vPc1pDKbdG_YMNr_n7N55x9kcm5UAYwRSJKiPEwJ1C_W2yqPMc-6d4SW_vY5ALSNj0Hd-bdJGZxxXzgrFPqMKs31XO42L12XkhsTp9q9I-EKeUsw7D2vK-KoC7opHwAkZNBc3Jby52ls2KdYPpDw",
+     "app_chain": 1,
+     "version": "publishedVersion"
+    }
+   ],
+   "got": {
+    "source": "openalex:best(Quantitative Science Studies)",
+    "version": "publishedVersion",
+    "bytes": 477704,
+    "by": "app-ua"
+   }
+  },
+  {
+   "doi": "10.36106/ijsr/7121954",
+   "label": "bibliometrics/closed",
+   "meta": {
+    "openalex_content_pdf": false,
+    "openalex": {
+     "is_oa": false,
+     "status": "closed",
+     "best_pdf": null,
+     "n_pdf_locations": 0
+    },
+    "unpaywall": {
+     "is_oa": false,
+     "status": "closed",
+     "best_pdf": null,
+     "n_locations": 0
+    },
+    "semanticscholar": {
+     "is_oa": false,
+     "pdf": "",
+     "arxiv": null,
+     "pmc": null
+    },
+    "europepmc": {
+     "found": false
+    }
+   },
+   "candidates": 0,
+   "attempts": [],
+   "got": null
+  },
+  {
+   "doi": "10.52783/rlj.v11i2.3796",
+   "label": "bibliometrics/gold",
+   "meta": {
+    "openalex_content_pdf": true,
+    "openalex": {
+     "is_oa": true,
+     "status": "gold",
+     "best_pdf": "https://www.russianlawjournal.org/index.php/journal/article/download/3796/2431",
+     "n_pdf_locations": 1
+    },
+    "unpaywall": {
+     "is_oa": true,
+     "status": "gold",
+     "best_pdf": "https://www.russianlawjournal.org/index.php/journal/article/download/3796/2431",
+     "n_locations": 1
+    },
+    "semanticscholar": {
+     "is_oa": true,
+     "pdf": "https://www.russianlawjournal.org/index.php/journal/article/download/3796/2431",
+     "arxiv": null,
+     "pmc": null
+    },
+    "europepmc": {
+     "found": false
+    }
+   },
+   "candidates": 1,
+   "attempts": [
+    {
+     "url": "https://www.russianlawjournal.org/index.php/journal/article/download/3796/2431",
+     "source": "openalex:best(?)",
+     "app": "HTTP 403",
+     "app_ms": 126,
+     "app_bytes": 0,
+     "app_final": "https://www.russianlawjournal.org/index.php/journal/article/download/3796/2431",
+     "app_chain": 0,
+     "browser": "HTTP 403",
+     "browser_bytes": 0,
+     "version": "publishedVersion"
+    }
+   ],
+   "got": null
+  },
+  {
+   "doi": "10.52783/eel.v14i1s.1350",
+   "label": "bibliometrics/gold",
+   "meta": {
+    "openalex_content_pdf": true,
+    "openalex": {
+     "is_oa": true,
+     "status": "gold",
+     "best_pdf": "https://www.eelet.org.uk/index.php/journal/article/download/1350/1161",
+     "n_pdf_locations": 1
+    },
+    "unpaywall": {
+     "is_oa": true,
+     "status": "gold",
+     "best_pdf": "https://www.eelet.org.uk/index.php/journal/article/download/1350/1161",
+     "n_locations": 1
+    },
+    "semanticscholar": {
+     "is_oa": true,
+     "pdf": "https://www.eelet.org.uk/index.php/journal/article/download/1350/1161",
+     "arxiv": null,
+     "pmc": null
+    },
+    "europepmc": {
+     "found": false
+    }
+   },
+   "candidates": 1,
+   "attempts": [
+    {
+     "url": "https://www.eelet.org.uk/index.php/journal/article/download/1350/1161",
+     "source": "openalex:best(?)",
+     "app": "PDF",
+     "app_ms": 4985,
+     "app_bytes": 796453,
+     "app_final": "https://www.eelet.org.uk/index.php/journal/article/download/1350/1161",
+     "app_chain": 0,
+     "version": "publishedVersion"
+    }
+   ],
+   "got": {
+    "source": "openalex:best(?)",
+    "version": "publishedVersion",
+    "bytes": 796453,
+    "by": "app-ua"
+   }
+  },
+  {
+   "doi": "10.56130/tucbis.1178247",
+   "label": "bibliometrics/bronze",
+   "meta": {
+    "openalex_content_pdf": true,
+    "openalex": {
+     "is_oa": true,
+     "status": "bronze",
+     "best_pdf": "https://dergipark.org.tr/en/download/article-file/2663023",
+     "n_pdf_locations": 2
+    },
+    "unpaywall": {
+     "is_oa": true,
+     "status": "bronze",
+     "best_pdf": "https://dergipark.org.tr/en/download/article-file/2663023",
+     "n_locations": 2
+    },
+    "semanticscholar": {
+     "is_oa": true,
+     "pdf": "https://dergipark.org.tr/en/download/article-file/2663023",
+     "arxiv": null,
+     "pmc": null
+    },
+    "europepmc": {
+     "found": false
+    }
+   },
+   "candidates": 2,
+   "attempts": [
+    {
+     "url": "https://dergipark.org.tr/en/download/article-file/2663023",
+     "source": "openalex:best(T\u00fcrkiye Co\u011frafi Bilgi Sistemleri Dergisi)",
+     "app": "PDF",
+     "app_ms": 11949,
+     "app_bytes": 949781,
+     "app_final": "https://dergipark.org.tr/en/download/article-file/2663023",
+     "app_chain": 0,
+     "version": "publishedVersion"
+    }
+   ],
+   "got": {
+    "source": "openalex:best(T\u00fcrkiye Co\u011frafi Bilgi Sistemleri Dergisi)",
+    "version": "publishedVersion",
+    "bytes": 949781,
+    "by": "app-ua"
+   }
+  },
+  {
+   "doi": "10.3727/108354222x16534530194787",
+   "label": "bibliometrics/closed",
+   "meta": {
+    "openalex_content_pdf": false,
+    "openalex": {
+     "is_oa": false,
+     "status": "closed",
+     "best_pdf": null,
+     "n_pdf_locations": 0
+    },
+    "unpaywall": {
+     "is_oa": false,
+     "status": "closed",
+     "best_pdf": null,
+     "n_locations": 0
+    },
+    "semanticscholar": {
+     "is_oa": false,
+     "pdf": "",
+     "arxiv": null,
+     "pmc": null
+    },
+    "europepmc": {
+     "found": false
+    }
+   },
+   "candidates": 0,
+   "attempts": [],
+   "got": null
+  },
+  {
+   "doi": "10.1108/md-01-2018-0085",
+   "label": "bibliometrics/closed",
+   "meta": {
+    "openalex_content_pdf": false,
+    "openalex": {
+     "is_oa": false,
+     "status": "closed",
+     "best_pdf": null,
+     "n_pdf_locations": 0
+    },
+    "unpaywall": {
+     "is_oa": false,
+     "status": "closed",
+     "best_pdf": null,
+     "n_locations": 0
+    },
+    "semanticscholar": {
+     "is_oa": false,
+     "pdf": "",
+     "arxiv": null,
+     "pmc": null
+    },
+    "europepmc": {
+     "found": false
+    }
+   },
+   "candidates": 0,
+   "attempts": [],
+   "got": null
+  },
+  {
+   "doi": "10.52783/jisem.v9i4.42",
+   "label": "bibliometrics/gold",
+   "meta": {
+    "openalex_content_pdf": true,
+    "openalex": {
+     "is_oa": true,
+     "status": "gold",
+     "best_pdf": "https://doi.org/10.52783/jisem.v9i4.42",
+     "n_pdf_locations": 1
+    },
+    "unpaywall": {
+     "is_oa": true,
+     "status": "gold",
+     "best_pdf": "https://doi.org/10.52783/jisem.v9i4.42",
+     "n_locations": 1
+    },
+    "semanticscholar": {
+     "is_oa": true,
+     "pdf": "https://doi.org/10.52783/jisem.v9i4.42",
+     "arxiv": null,
+     "pmc": null
+    },
+    "europepmc": {
+     "found": false
+    }
+   },
+   "candidates": 1,
+   "attempts": [
+    {
+     "url": "https://doi.org/10.52783/jisem.v9i4.42",
+     "source": "openalex:best(?)",
+     "app": "PDF",
+     "app_ms": 782,
+     "app_bytes": 1147887,
+     "app_final": "https://www.jisem-journal.com/download/42_20250531131001526_AP-5204.pdf",
+     "app_chain": 1,
+     "version": "publishedVersion"
+    }
+   ],
+   "got": {
+    "source": "openalex:best(?)",
+    "version": "publishedVersion",
+    "bytes": 1147887,
+    "by": "app-ua"
+   }
+  },
+  {
+   "doi": "10.17755/esosder.950426",
+   "label": "bibliometrics/hybrid",
+   "meta": {
+    "openalex_content_pdf": true,
+    "openalex": {
+     "is_oa": true,
+     "status": "hybrid",
+     "best_pdf": "https://dergipark.org.tr/en/download/article-file/1816592",
+     "n_pdf_locations": 2
+    },
+    "unpaywall": {
+     "is_oa": true,
+     "status": "hybrid",
+     "best_pdf": "https://dergipark.org.tr/en/download/article-file/1816592",
+     "n_locations": 2
+    },
+    "semanticscholar": {
+     "is_oa": true,
+     "pdf": "https://dergipark.org.tr/en/download/article-file/1816592",
+     "arxiv": null,
+     "pmc": null
+    },
+    "europepmc": {
+     "found": false
+    }
+   },
+   "candidates": 2,
+   "attempts": [
+    {
+     "url": "https://dergipark.org.tr/en/download/article-file/1816592",
+     "source": "openalex:best(Elektronik Sosyal Bilimler Dergisi)",
+     "app": "PDF",
+     "app_ms": 6816,
+     "app_bytes": 1253212,
+     "app_final": "https://dergipark.org.tr/en/download/article-file/1816592",
+     "app_chain": 0,
+     "version": "publishedVersion"
+    }
+   ],
+   "got": {
+    "source": "openalex:best(Elektronik Sosyal Bilimler Dergisi)",
+    "version": "publishedVersion",
+    "bytes": 1253212,
+    "by": "app-ua"
+   }
+  },
+  {
+   "doi": "10.52783/jes.2137",
+   "label": "bibliometrics/hybrid",
+   "meta": {
+    "openalex_content_pdf": true,
+    "openalex": {
+     "is_oa": true,
+     "status": "hybrid",
+     "best_pdf": "https://www.journal.esrgroups.org/jes/article/download/2137/1689",
+     "n_pdf_locations": 1
+    },
+    "unpaywall": {
+     "is_oa": true,
+     "status": "hybrid",
+     "best_pdf": "https://www.journal.esrgroups.org/jes/article/download/2137/1689",
+     "n_locations": 1
+    },
+    "semanticscholar": {
+     "is_oa": true,
+     "pdf": "https://www.journal.esrgroups.org/jes/article/download/2137/1689",
+     "arxiv": null,
+     "pmc": null
+    },
+    "europepmc": {
+     "found": false
+    }
+   },
+   "candidates": 1,
+   "attempts": [
+    {
+     "url": "https://www.journal.esrgroups.org/jes/article/download/2137/1689",
+     "source": "openalex:best(Journal of Electrical Systems)",
+     "app": "PDF",
+     "app_ms": 4481,
+     "app_bytes": 660682,
+     "app_final": "https://www.journal.esrgroups.org/jes/article/download/2137/1689",
+     "app_chain": 0,
+     "version": "publishedVersion"
+    }
+   ],
+   "got": {
+    "source": "openalex:best(Journal of Electrical Systems)",
+    "version": "publishedVersion",
+    "bytes": 660682,
+    "by": "app-ua"
+   }
+  },
+  {
+   "doi": "10.3390/membranes12050447",
+   "label": "materials/gold",
+   "meta": {
+    "openalex_content_pdf": true,
+    "openalex": {
+     "is_oa": true,
+     "status": "gold",
+     "best_pdf": "https://www.mdpi.com/2077-0375/12/5/447/pdf?version=1650601499",
+     "n_pdf_locations": 1
+    },
+    "unpaywall": {
+     "is_oa": true,
+     "status": "gold",
+     "best_pdf": "https://www.mdpi.com/2077-0375/12/5/447/pdf?version=1650601499",
+     "n_locations": 3
+    },
+    "semanticscholar": {
+     "is_oa": true,
+     "pdf": "https://www.mdpi.com/2077-0375/12/5/447/pdf?version=1650601499",
+     "arxiv": null,
+     "pmc": "9146937"
+    },
+    "europepmc": {
+     "pmcid": "PMC9146937",
+     "isOpenAccess": "Y",
+     "inPMC": "Y",
+     "pdf_urls": [
+      "https://www.mdpi.com/2077-0375/12/5/447/pdf?version=1650601499",
+      "https://www.mdpi.com/2077-0375/12/5/447/pdf?version=1650601499",
+      "https://www.mdpi.com/2077-0375/12/5/447/pdf?version=1650601499",
+      "https://www.mdpi.com/2077-0375/12/5/447/pdf?version=1650601499",
+      "https://europepmc.org/articles/PMC9146937?pdf=render"
+     ]
+    }
+   },
+   "candidates": 3,
+   "attempts": [
+    {
+     "url": "https://www.mdpi.com/2077-0375/12/5/447/pdf?version=1650601499",
+     "source": "openalex:best(Membranes)",
+     "app": "HTTP 403",
+     "app_ms": 73,
+     "app_bytes": 0,
+     "app_final": "https://www.mdpi.com/2077-0375/12/5/447/pdf?version=1650601499",
+     "app_chain": 0,
+     "browser": "HTTP 403",
+     "browser_bytes": 0,
+     "version": "publishedVersion"
+    },
+    {
+     "url": "https://europepmc.org/articles/PMC9146937?pdf=render",
+     "source": "europepmc:OA",
+     "app": "HTTP 403",
+     "app_ms": 53,
+     "app_bytes": 0,
+     "app_final": "https://europepmc.org/articles/PMC9146937?pdf=render",
+     "app_chain": 0,
+     "browser": "HTTP 403",
+     "browser_bytes": 0,
+     "version": null
+    },
+    {
+     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC9146937/pdf/",
+     "source": "pmc:articles-pdf",
+     "app": "html-page",
+     "app_ms": 188,
+     "app_bytes": 1817,
+     "app_final": "https://pmc.ncbi.nlm.nih.gov/articles/PMC9146937/pdf/membranes-12-00447.pdf",
+     "app_chain": 1,
+     "browser": "html-page",
+     "browser_bytes": 1814,
+     "version": null
+    }
+   ],
+   "got": null
+  },
+  {
+   "doi": "10.3390/membranes14020032",
+   "label": "materials/gold",
+   "meta": {
+    "openalex_content_pdf": true,
+    "openalex": {
+     "is_oa": true,
+     "status": "gold",
+     "best_pdf": "https://www.mdpi.com/2077-0375/14/2/32/pdf?version=1706235521",
+     "n_pdf_locations": 2
+    },
+    "unpaywall": {
+     "is_oa": true,
+     "status": "gold",
+     "best_pdf": "https://www.mdpi.com/2077-0375/14/2/32/pdf?version=1706235521",
+     "n_locations": 3
+    },
+    "semanticscholar": {
+     "is_oa": true,
+     "pdf": "https://www.mdpi.com/2077-0375/14/2/32/pdf?version=1706235521",
+     "arxiv": null,
+     "pmc": "10890694"
+    },
+    "europepmc": {
+     "pmcid": "PMC10890694",
+     "isOpenAccess": "Y",
+     "inPMC": "Y",
+     "pdf_urls": [
+      "https://europepmc.org/articles/PMC10890694?pdf=render"
+     ]
+    }
+   },
+   "candidates": 4,
+   "attempts": [
+    {
+     "url": "https://www.mdpi.com/2077-0375/14/2/32/pdf?version=1706235521",
+     "source": "openalex:best(Membranes)",
+     "app": "HTTP 403",
+     "app_ms": 82,
+     "app_bytes": 0,
+     "app_final": "https://www.mdpi.com/2077-0375/14/2/32/pdf?version=1706235521",
+     "app_chain": 0,
+     "browser": "HTTP 403",
+     "browser_bytes": 0,
+     "version": "publishedVersion"
+    },
+    {
+     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC10890694/pdf/membranes-14-00032.pdf",
+     "source": "openalex:PubMed Central",
+     "app": "html-page",
+     "app_ms": 96,
+     "app_bytes": 1816,
+     "app_final": "https://pmc.ncbi.nlm.nih.gov/articles/PMC10890694/pdf/membranes-14-00032.pdf",
+     "app_chain": 0,
+     "browser": "html-page",
+     "browser_bytes": 1817,
+     "version": "submittedVersion"
+    },
+    {
+     "url": "https://europepmc.org/articles/PMC10890694?pdf=render",
+     "source": "europepmc:OA",
+     "app": "HTTP 403",
+     "app_ms": 38,
+     "app_bytes": 0,
+     "app_final": "https://europepmc.org/articles/PMC10890694?pdf=render",
+     "app_chain": 0,
+     "browser": "HTTP 403",
+     "browser_bytes": 0,
+     "version": null
+    },
+    {
+     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC10890694/pdf/",
+     "source": "pmc:articles-pdf",
+     "app": "html-page",
+     "app_ms": 164,
+     "app_bytes": 1817,
+     "app_final": "https://pmc.ncbi.nlm.nih.gov/articles/PMC10890694/pdf/membranes-14-00032.pdf",
+     "app_chain": 1,
+     "browser": "html-page",
+     "browser_bytes": 1817,
+     "version": null
+    }
+   ],
+   "got": null
+  },
+  {
+   "doi": "10.3390/membranes13110874",
+   "label": "materials/gold",
+   "meta": {
+    "openalex_content_pdf": true,
+    "openalex": {
+     "is_oa": true,
+     "status": "gold",
+     "best_pdf": "https://www.mdpi.com/2077-0375/13/11/874/pdf?version=1698998585",
+     "n_pdf_locations": 2
+    },
+    "unpaywall": {
+     "is_oa": true,
+     "status": "gold",
+     "best_pdf": "https://www.mdpi.com/2077-0375/13/11/874/pdf?version=1698998585",
+     "n_locations": 3
+    },
+    "semanticscholar": {
+     "is_oa": true,
+     "pdf": "https://www.mdpi.com/2077-0375/13/11/874/pdf?version=1698998585",
+     "arxiv": null,
+     "pmc": "10673284"
+    },
+    "europepmc": {
+     "pmcid": "PMC10673284",
+     "isOpenAccess": "Y",
+     "inPMC": "Y",
+     "pdf_urls": [
+      "https://europepmc.org/articles/PMC10673284?pdf=render"
+     ]
+    }
+   },
+   "candidates": 4,
+   "attempts": [
+    {
+     "url": "https://www.mdpi.com/2077-0375/13/11/874/pdf?version=1698998585",
+     "source": "openalex:best(Membranes)",
+     "app": "HTTP 403",
+     "app_ms": 67,
+     "app_bytes": 0,
+     "app_final": "https://www.mdpi.com/2077-0375/13/11/874/pdf?version=1698998585",
+     "app_chain": 0,
+     "browser": "HTTP 403",
+     "browser_bytes": 0,
+     "version": "publishedVersion"
+    },
+    {
+     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC10673284/pdf/membranes-13-00874.pdf",
+     "source": "openalex:PubMed Central",
+     "app": "html-page",
+     "app_ms": 84,
+     "app_bytes": 1817,
+     "app_final": "https://pmc.ncbi.nlm.nih.gov/articles/PMC10673284/pdf/membranes-13-00874.pdf",
+     "app_chain": 0,
+     "browser": "html-page",
+     "browser_bytes": 1817,
+     "version": "submittedVersion"
+    },
+    {
+     "url": "https://europepmc.org/articles/PMC10673284?pdf=render",
+     "source": "europepmc:OA",
+     "app": "HTTP 403",
+     "app_ms": 42,
+     "app_bytes": 0,
+     "app_final": "https://europepmc.org/articles/PMC10673284?pdf=render",
+     "app_chain": 0,
+     "browser": "HTTP 403",
+     "browser_bytes": 0,
+     "version": null
+    },
+    {
+     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC10673284/pdf/",
+     "source": "pmc:articles-pdf",
+     "app": "html-page",
+     "app_ms": 194,
+     "app_bytes": 1817,
+     "app_final": "https://pmc.ncbi.nlm.nih.gov/articles/PMC10673284/pdf/membranes-13-00874.pdf",
+     "app_chain": 1,
+     "browser": "html-page",
+     "browser_bytes": 1817,
+     "version": null
+    }
+   ],
+   "got": null
+  },
+  {
+   "doi": "10.1016/j.envres.2021.111576",
+   "label": "materials/closed",
+   "meta": {
+    "openalex_content_pdf": false,
+    "openalex": {
+     "is_oa": false,
+     "status": "closed",
+     "best_pdf": null,
+     "n_pdf_locations": 0
+    },
+    "unpaywall": {
+     "is_oa": false,
+     "status": "closed",
+     "best_pdf": null,
+     "n_locations": 0
+    },
+    "semanticscholar": {
+     "is_oa": false,
+     "pdf": "",
+     "arxiv": null,
+     "pmc": null
+    },
+    "europepmc": {
+     "pmcid": null,
+     "isOpenAccess": "N",
+     "inPMC": "N",
+     "pdf_urls": []
+    }
+   },
+   "candidates": 0,
+   "attempts": [],
+   "got": null
+  },
+  {
+   "doi": "10.1002/smll.201901023",
+   "label": "materials/closed",
+   "meta": {
+    "openalex_content_pdf": false,
+    "openalex": {
+     "is_oa": false,
+     "status": "closed",
+     "best_pdf": null,
+     "n_pdf_locations": 0
+    },
+    "unpaywall": {
+     "is_oa": false,
+     "status": "closed",
+     "best_pdf": null,
+     "n_locations": 0
+    },
+    "semanticscholar": {
+     "is_oa": false,
+     "pdf": "",
+     "arxiv": null,
+     "pmc": null
+    },
+    "europepmc": {
+     "pmcid": null,
+     "isOpenAccess": "N",
+     "inPMC": "N",
+     "pdf_urls": []
+    }
+   },
+   "candidates": 0,
+   "attempts": [],
+   "got": null
+  },
+  {
+   "doi": "10.1016/j.desal.2022.115601",
+   "label": "materials/closed",
+   "meta": {
+    "openalex_content_pdf": false,
+    "openalex": {
+     "is_oa": false,
+     "status": "closed",
+     "best_pdf": null,
+     "n_pdf_locations": 0
+    },
+    "unpaywall": {
+     "is_oa": false,
+     "status": "closed",
+     "best_pdf": null,
+     "n_locations": 0
+    },
+    "semanticscholar": {
+     "is_oa": false,
+     "pdf": "",
+     "arxiv": null,
+     "pmc": null
+    },
+    "europepmc": {
+     "found": false
+    }
+   },
+   "candidates": 0,
+   "attempts": [],
+   "got": null
+  },
+  {
+   "doi": "10.1088/2053-1591/ab1ffd",
+   "label": "materials/bronze",
+   "meta": {
+    "openalex_content_pdf": true,
+    "openalex": {
+     "is_oa": true,
+     "status": "bronze",
+     "best_pdf": "https://iopscience.iop.org/article/10.1088/2053-1591/ab1ffd/pdf",
+     "n_pdf_locations": 1
+    },
+    "unpaywall": {
+     "is_oa": true,
+     "status": "bronze",
+     "best_pdf": "https://iopscience.iop.org/article/10.1088/2053-1591/ab1ffd/pdf",
+     "n_locations": 1
+    },
+    "semanticscholar": {
+     "is_oa": false,
+     "pdf": "",
+     "arxiv": null,
+     "pmc": null
+    },
+    "europepmc": {
+     "found": false
+    }
+   },
+   "candidates": 1,
+   "attempts": [
+    {
+     "url": "https://iopscience.iop.org/article/10.1088/2053-1591/ab1ffd/pdf",
+     "source": "openalex:best(Materials Research Express)",
+     "app": "html-page",
+     "app_ms": 735,
+     "app_bytes": 14367,
+     "app_final": "https://validate.perfdrive.com/fb803c746e9148689b3984a31fccd902/?ssa=da9b3699-e5c8-4e21-9033-e3e9c0a5591c&ssb=97506255661&ssc=https%3A%2F%2Fiopscience.iop.org%2Farticle%2F10.1088%2F2053-1591%2Fab1ffd%2Fpdf&ssi=78455a0f-cnvj-43d9-aeed-3eb739c11465&ssk=botmanager_support@radware.com&ssm=20945838426636057109761067944887&ssn=c0c9ae9e741a20e1c9bee24cd5bcae03ee74042e32d0-ad98-4758-bde318&sso=5cfc4ce9-8d317bfa1a3934431eadce1d6a7061b533e3b534d5107e4a&ssp=34813428371790743037179071175853228&ssq=91414594098768875765140987984872692964131&ssr=MzQuMTkuMzIuNjQ=&sst=VOSStudio/1.16.0&ssu=&ssv=&ssw=&ssx=eyJfX3V6bWYiOiI3ZjkwMDAwNDJlMzJkMC1hZDk4LTQ3NTgtYmNlOS04ZDMxN2JmYTFhMzkxLTE3OTA3NDA5ODc5NjEwLTAwNWI1MzE2YjFlN2Q0N2FkMWIxMCIsInJkIjoiaW9wLm9yZyIsInV6bXgiOiI3ZmMwMDBiOGRhN2Y2ZC0yZGM5LTRjNjktYmE1YS1jZTA0YjdkMmRiMGUxLTE3OTA3NDA5ODc5NjEwLTAwNzdiNTE2YTJmNjA1YzQ1ZWUxMCJ9",
+     "app_chain": 1,
+     "browser": "html-page",
+     "browser_bytes": 14367,
+     "version": "publishedVersion"
+    }
+   ],
+   "got": null
+  },
+  {
+   "doi": "10.1002/admi.201970081",
+   "label": "materials/bronze",
+   "meta": {
+    "openalex_content_pdf": true,
+    "openalex": {
+     "is_oa": true,
+     "status": "bronze",
+     "best_pdf": "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1002/admi.201970081",
+     "n_pdf_locations": 1
+    },
+    "unpaywall": {
+     "is_oa": true,
+     "status": "bronze",
+     "best_pdf": "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1002/admi.201970081",
+     "n_locations": 1
+    },
+    "semanticscholar": {
+     "is_oa": true,
+     "pdf": "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1002/admi.201970081",
+     "arxiv": null,
+     "pmc": null
+    },
+    "europepmc": {
+     "found": false
+    }
+   },
+   "candidates": 1,
+   "attempts": [
+    {
+     "url": "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1002/admi.201970081",
+     "source": "openalex:best(Advanced Materials Interfaces)",
+     "app": "HTTP 403",
+     "app_ms": 43,
+     "app_bytes": 0,
+     "app_final": "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1002/admi.201970081",
+     "app_chain": 0,
+     "browser": "HTTP 403",
+     "browser_bytes": 0,
+     "version": "publishedVersion"
+    }
+   ],
+   "got": null
+  },
+  {
+   "doi": "10.1002/aic.17865",
+   "label": "materials/bronze",
+   "meta": {
+    "openalex_content_pdf": true,
+    "openalex": {
+     "is_oa": true,
+     "status": "bronze",
+     "best_pdf": "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1002/aic.17865",
+     "n_pdf_locations": 1
+    },
+    "unpaywall": {
+     "is_oa": true,
+     "status": "bronze",
+     "best_pdf": "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1002/aic.17865",
+     "n_locations": 1
+    },
+    "semanticscholar": {
+     "is_oa": true,
+     "pdf": "https://rss.onlinelibrary.wiley.com/doi/am-pdf/10.1002/aic.17865",
+     "arxiv": null,
+     "pmc": null
+    },
+    "europepmc": {
+     "found": false
+    }
+   },
+   "candidates": 2,
+   "attempts": [
+    {
+     "url": "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1002/aic.17865",
+     "source": "openalex:best(AIChE Journal)",
+     "app": "HTTP 403",
+     "app_ms": 47,
+     "app_bytes": 0,
+     "app_final": "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1002/aic.17865",
+     "app_chain": 0,
+     "browser": "HTTP 403",
+     "browser_bytes": 0,
+     "version": "publishedVersion"
+    },
+    {
+     "url": "https://rss.onlinelibrary.wiley.com/doi/am-pdf/10.1002/aic.17865",
+     "source": "s2:openAccessPdf(BRONZE)",
+     "app": "HTTP 403",
+     "app_ms": 48,
+     "app_bytes": 0,
+     "app_final": "https://rss.onlinelibrary.wiley.com/doi/am-pdf/10.1002/aic.17865",
+     "app_chain": 0,
+     "browser": "HTTP 403",
+     "browser_bytes": 0,
+     "version": null
+    }
+   ],
+   "got": null
+  },
+  {
+   "doi": "10.2139/ssrn.4041239",
+   "label": "materials/green",
+   "meta": {
+    "openalex_content_pdf": false,
+    "openalex": {
+     "is_oa": true,
+     "status": "green",
+     "best_pdf": null,
+     "n_pdf_locations": 0
+    },
+    "unpaywall": {
+     "is_oa": true,
+     "status": "green",
+     "best_pdf": null,
+     "n_locations": 1
+    },
+    "semanticscholar": {
+     "is_oa": false,
+     "pdf": "",
+     "arxiv": null,
+     "pmc": null
+    },
+    "europepmc": {
+     "found": false
+    }
+   },
+   "candidates": 0,
+   "attempts": [],
+   "got": null
+  },
+  {
+   "doi": "10.1037/emo0001328.supp",
+   "label": "medicine/closed",
+   "meta": {
+    "openalex_content_pdf": false,
+    "openalex": {
+     "is_oa": false,
+     "status": "closed",
+     "best_pdf": null,
+     "n_pdf_locations": 0
+    },
+    "unpaywall": {
+     "is_oa": false,
+     "status": "closed",
+     "best_pdf": null,
+     "n_locations": 0
+    },
+    "semanticscholar": {
+     "is_oa": false,
+     "pdf": "",
+     "arxiv": null,
+     "pmc": null
+    },
+    "europepmc": {
+     "found": false
+    }
+   },
+   "candidates": 0,
+   "attempts": [],
+   "got": null
+  },
+  {
+   "doi": "10.1016/j.explore.2023.04.012",
+   "label": "medicine/hybrid",
+   "meta": {
+    "openalex_content_pdf": false,
+    "openalex": {
+     "is_oa": true,
+     "status": "hybrid",
+     "best_pdf": null,
+     "n_pdf_locations": 0
+    },
+    "unpaywall": {
+     "is_oa": true,
+     "status": "hybrid",
+     "best_pdf": null,
+     "n_locations": 1
+    },
+    "semanticscholar": {
+     "is_oa": true,
+     "pdf": "https://doi.org/10.1016/j.explore.2023.04.012",
+     "arxiv": null,
+     "pmc": null
+    },
+    "europepmc": {
+     "pmcid": null,
+     "isOpenAccess": "N",
+     "inPMC": "N",
+     "pdf_urls": []
+    }
+   },
+   "candidates": 1,
+   "attempts": [
+    {
+     "url": "https://doi.org/10.1016/j.explore.2023.04.012",
+     "source": "s2:openAccessPdf(HYBRID)",
+     "app": "html-page",
+     "app_ms": 329,
+     "app_bytes": 2739,
+     "app_final": "https://linkinghub.elsevier.com/retrieve/pii/S1550830723001180",
+     "app_chain": 1,
+     "browser": "html-page",
+     "browser_bytes": 2739,
+     "version": null
+    }
+   ],
+   "got": null
+  },
+  {
+   "doi": "10.1212/wnl.0000000000011470",
+   "label": "medicine/closed",
+   "meta": {
+    "openalex_content_pdf": false,
+    "openalex": {
+     "is_oa": false,
+     "status": "closed",
+     "best_pdf": null,
+     "n_pdf_locations": 0
+    },
+    "unpaywall": {
+     "is_oa": false,
+     "status": "closed",
+     "best_pdf": null,
+     "n_locations": 0
+    },
+    "semanticscholar": {
+     "is_oa": false,
+     "pdf": "",
+     "arxiv": null,
+     "pmc": null
+    },
+    "europepmc": {
+     "pmcid": null,
+     "isOpenAccess": "N",
+     "inPMC": "N",
+     "pdf_urls": []
+    }
+   },
+   "candidates": 0,
+   "attempts": [],
+   "got": null
+  },
+  {
+   "doi": "10.1186/s13561-020-00273-0",
+   "label": "medicine/gold",
+   "meta": {
+    "openalex_content_pdf": true,
+    "openalex": {
+     "is_oa": true,
+     "status": "gold",
+     "best_pdf": "https://healtheconomicsreview.biomedcentral.com/track/pdf/10.1186/s13561-020-00273-0",
+     "n_pdf_locations": 1
+    },
+    "unpaywall": {
+     "is_oa": true,
+     "status": "gold",
+     "best_pdf": "https://healtheconomicsreview.biomedcentral.com/track/pdf/10.1186/s13561-020-00273-0",
+     "n_locations": 5
+    },
+    "semanticscholar": {
+     "is_oa": true,
+     "pdf": "https://healtheconomicsreview.biomedcentral.com/track/pdf/10.1186/s13561-020-00273-0",
+     "arxiv": null,
+     "pmc": "7298860"
+    },
+    "europepmc": {
+     "pmcid": "PMC7298860",
+     "isOpenAccess": "Y",
+     "inPMC": "Y",
+     "pdf_urls": [
+      "https://europepmc.org/articles/PMC7298860?pdf=render"
+     ]
+    }
+   },
+   "candidates": 3,
+   "attempts": [
+    {
+     "url": "https://healtheconomicsreview.biomedcentral.com/track/pdf/10.1186/s13561-020-00273-0",
+     "source": "openalex:best(Health Economics Review)",
+     "app": "PDF",
+     "app_ms": 3174,
+     "app_bytes": 1001668,
+     "app_final": "https://link.springer.com/content/pdf/10.1186/s13561-020-00273-0.pdf",
+     "app_chain": 4,
+     "version": "publishedVersion"
+    }
+   ],
+   "got": {
+    "source": "openalex:best(Health Economics Review)",
+    "version": "publishedVersion",
+    "bytes": 1001668,
+    "by": "app-ua"
+   }
+  },
+  {
+   "doi": "10.1212/wnl.0000000000011473",
+   "label": "medicine/closed",
+   "meta": {
+    "openalex_content_pdf": false,
+    "openalex": {
+     "is_oa": false,
+     "status": "closed",
+     "best_pdf": null,
+     "n_pdf_locations": 0
+    },
+    "unpaywall": {
+     "is_oa": false,
+     "status": "closed",
+     "best_pdf": null,
+     "n_locations": 0
+    },
+    "semanticscholar": {
+     "is_oa": false,
+     "pdf": "",
+     "arxiv": null,
+     "pmc": null
+    },
+    "europepmc": {
+     "pmcid": null,
+     "isOpenAccess": "N",
+     "inPMC": "N",
+     "pdf_urls": []
+    }
+   },
+   "candidates": 0,
+   "attempts": [],
+   "got": null
+  },
+  {
+   "doi": "10.4103/jfmpc.jfmpc_396_18",
+   "label": "medicine/gold",
+   "meta": {
+    "openalex_content_pdf": false,
+    "openalex": {
+     "is_oa": true,
+     "status": "gold",
+     "best_pdf": null,
+     "n_pdf_locations": 0
+    },
+    "unpaywall": {
+     "is_oa": true,
+     "status": "gold",
+     "best_pdf": null,
+     "n_locations": 3
+    },
+    "semanticscholar": {
+     "is_oa": true,
+     "pdf": "https://doi.org/10.4103/jfmpc.jfmpc_396_18",
+     "arxiv": null,
+     "pmc": "6482762"
+    },
+    "europepmc": {
+     "pmcid": "PMC6482762",
+     "isOpenAccess": "Y",
+     "inPMC": "Y",
+     "pdf_urls": [
+      "https://europepmc.org/articles/PMC6482762?pdf=render"
+     ]
+    }
+   },
+   "candidates": 3,
+   "attempts": [
+    {
+     "url": "https://doi.org/10.4103/jfmpc.jfmpc_396_18",
+     "source": "s2:openAccessPdf(GOLD)",
+     "app": "html-page",
+     "app_ms": 1010,
+     "app_bytes": 289389,
+     "app_final": "https://www.ovid.com/jnls/jfmpc/fulltext/10.4103/jfmpc.jfmpc_396_18~cognitive-behavioral-therapy-for-depression-among-menopausal",
+     "app_chain": 2,
+     "browser": "html-page",
+     "browser_bytes": 289749,
+     "version": null
+    },
+    {
+     "url": "https://europepmc.org/articles/PMC6482762?pdf=render",
+     "source": "europepmc:OA",
+     "app": "HTTP 403",
+     "app_ms": 37,
+     "app_bytes": 0,
+     "app_final": "https://europepmc.org/articles/PMC6482762?pdf=render",
+     "app_chain": 0,
+     "browser": "HTTP 403",
+     "browser_bytes": 0,
+     "version": null
+    },
+    {
+     "url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC6482762/pdf/",
+     "source": "pmc:articles-pdf",
+     "app": "html-page",
+     "app_ms": 206,
+     "app_bytes": 1817,
+     "app_final": "https://pmc.ncbi.nlm.nih.gov/articles/PMC6482762/pdf/JFMPC-8-1002.pdf",
+     "app_chain": 1,
+     "browser": "html-page",
+     "browser_bytes": 1816,
+     "version": null
+    }
+   ],
+   "got": null
+  },
+  {
+   "doi": "10.1186/s13063-019-3815-4",
+   "label": "medicine/gold",
+   "meta": {
+    "openalex_content_pdf": true,
+    "openalex": {
+     "is_oa": true,
+     "status": "gold",
+     "best_pdf": "https://trialsjournal.biomedcentral.com/track/pdf/10.1186/s13063-019-3815-4",
+     "n_pdf_locations": 1
+    },
+    "unpaywall": {
+     "is_oa": true,
+     "status": "gold",
+     "best_pdf": "https://trialsjournal.biomedcentral.com/track/pdf/10.1186/s13063-019-3815-4",
+     "n_locations": 3
+    },
+    "semanticscholar": {
+     "is_oa": true,
+     "pdf": "https://trialsjournal.biomedcentral.com/track/pdf/10.1186/s13063-019-3815-4",
+     "arxiv": null,
+     "pmc": "6945547"
+    },
+    "europepmc": {
+     "pmcid": "PMC6945547",
+     "isOpenAccess": "Y",
+     "inPMC": "Y",
+     "pdf_urls": [
+      "https://europepmc.org/articles/PMC6945547?pdf=render"
+     ]
+    }
+   },
+   "candidates": 3,
+   "attempts": [
+    {
+     "url": "https://trialsjournal.biomedcentral.com/track/pdf/10.1186/s13063-019-3815-4",
+     "source": "openalex:best(Trials)",
+     "app": "PDF",
+     "app_ms": 2742,
+     "app_bytes": 896886,
+     "app_final": "https://link.springer.com/content/pdf/10.1186/s13063-019-3815-4.pdf",
+     "app_chain": 4,
+     "version": "publishedVersion"
+    }
+   ],
+   "got": {
+    "source": "openalex:best(Trials)",
+    "version": "publishedVersion",
+    "bytes": 896886,
+    "by": "app-ua"
+   }
+  },
+  {
+   "doi": "10.1002/da.22788",
+   "label": "medicine/hybrid",
+   "meta": {
+    "openalex_content_pdf": true,
+    "openalex": {
+     "is_oa": true,
+     "status": "hybrid",
+     "best_pdf": "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1002/da.22788",
+     "n_pdf_locations": 3
+    },
+    "unpaywall": {
+     "is_oa": true,
+     "status": "hybrid",
+     "best_pdf": "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1002/da.22788",
+     "n_locations": 5
+    },
+    "semanticscholar": {
+     "is_oa": true,
+     "pdf": "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1002/da.22788",
+     "arxiv": null,
+     "pmc": "6175087"
+    },
+    "europepmc": {
+     "pmcid": "PMC6175087",
+     "isOpenAccess": "Y",
+     "inPMC": "Y",
+     "pdf_urls": [
+      "https://europepmc.org/articles/PMC6175087?pdf=render"
+     ]
+    }
+   },
+   "candidates": 5,
+   "attempts": [
+    {
+     "url": "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1002/da.22788",
+     "source": "openalex:best(Depression and Anxiety)",
+     "app": "HTTP 403",
+     "app_ms": 45,
+     "app_bytes": 0,
+     "app_final": "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1002/da.22788",
+     "app_chain": 0,
+     "browser": "HTTP 403",
+     "browser_bytes": 0,
+     "version": "publishedVersion"
+    },
+    {
+     "url": "https://repository.ubn.ru.nl/bitstream/handle/2066/195861/1/195861pub.pdf",
+     "source": "openalex:Radboud Repository (Radboud University)",
+     "app": "HTTP 403",
+     "app_ms": 521,
+     "app_bytes": 0,
+     "app_final": "https://repository.ubn.ru.nl/bitstream/handle/2066/195861/1/195861pub.pdf",
+     "app_chain": 0,
+     "browser": "HTTP 403",
+     "browser_bytes": 0,
+     "version": "submittedVersion"
+    },
+    {
+     "url": "http://hdl.handle.net/2066/195861",
+     "source": "openalex:Radboud Repository (Radboud University)",
+     "app": "HTTP 403",
+     "app_ms": 822,
+     "app_bytes": 0,
+     "app_final": "http://hdl.handle.net/2066/195861",
+     "app_chain": 1,
+     "browser": "HTTP 403",
+     "browser_bytes": 0,
+     "version": "submittedVersion"
+    },
+    {
+     "url": "https://europepmc.org/articles/PMC6175087?pdf=render",
+     "source": "europepmc:OA",
+     "app": "HTTP 403",
+     "app_ms": 39,
+     "app_bytes": 0,
+     "app_final": "https://europepmc.org/articles/PMC6175087?pdf=render",
+     "app_chain": 0,
+     "browser": "HTTP 403",
+     "browser_bytes": 0,
+     "version": null
+    }
+   ],
+   "got": null
+  },
+  {
+   "doi": "10.1002/da.23249",
+   "label": "medicine/hybrid",
+   "meta": {
+    "openalex_content_pdf": true,
+    "openalex": {
+     "is_oa": true,
+     "status": "hybrid",
+     "best_pdf": "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1002/da.23249",
+     "n_pdf_locations": 1
+    },
+    "unpaywall": {
+     "is_oa": true,
+     "status": "hybrid",
+     "best_pdf": "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1002/da.23249",
+     "n_locations": 3
+    },
+    "semanticscholar": {
+     "is_oa": true,
+     "pdf": "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1002/da.23249",
+     "arxiv": null,
+     "pmc": null
+    },
+    "europepmc": {
+     "pmcid": null,
+     "isOpenAccess": "N",
+     "inPMC": "N",
+     "pdf_urls": []
+    }
+   },
+   "candidates": 1,
+   "attempts": [
+    {
+     "url": "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1002/da.23249",
+     "source": "openalex:best(Depression and Anxiety)",
+     "app": "HTTP 403",
+     "app_ms": 37,
+     "app_bytes": 0,
+     "app_final": "https://onlinelibrary.wiley.com/doi/pdfdirect/10.1002/da.23249",
+     "app_chain": 0,
+     "browser": "HTTP 403",
+     "browser_bytes": 0,
+     "version": "publishedVersion"
+    }
+   ],
+   "got": null
+  },
+  {
+   "doi": "10.1016/j.eurpsy.2018.05.010",
+   "label": "medicine/bronze",
+   "meta": {
+    "openalex_content_pdf": true,
+    "openalex": {
+     "is_oa": true,
+     "status": "bronze",
+     "best_pdf": "https://www.cambridge.org/core/services/aop-cambridge-core/content/view/B2FB9203EA185CC26E1608CE71F08409/S0924933800008567a.pdf/div-class-title-metacognitive-training-for-depression-d-mct-reduces-false-memories-in-depression-a-randomized-controlled-trial-div.pdf",
+     "n_pdf_locations": 1
+    },
+    "unpaywall": {
+     "is_oa": true,
+     "status": "bronze",
+     "best_pdf": "https://www.cambridge.org/core/services/aop-cambridge-core/content/view/B2FB9203EA185CC26E1608CE71F08409/S0924933800008567a.pdf/div-class-title-metacognitive-training-for-depression-d-mct-reduces-false-memories-in-depression-a-randomized-controlled-trial-div.pdf",
+     "n_locations": 1
+    },
+    "semanticscholar": {
+     "is_oa": true,
+     "pdf": "https://www.cambridge.org/core/services/aop-cambridge-core/content/view/B2FB9203EA185CC26E1608CE71F08409/S0924933800008567a.pdf/div-class-title-metacognitive-training-for-depression-d-mct-reduces-false-memories-in-depression-a-randomized-controlled-trial-div.pdf",
+     "arxiv": null,
+     "pmc": null
+    },
+    "europepmc": {
+     "pmcid": null,
+     "isOpenAccess": "N",
+     "inPMC": "N",
+     "pdf_urls": []
+    }
+   },
+   "candidates": 1,
+   "attempts": [
+    {
+     "url": "https://www.cambridge.org/core/services/aop-cambridge-core/content/view/B2FB9203EA185CC26E1608CE71F08409/S0924933800008567a.pdf/div-class-title-metacognitive-training-for-depression-d-mct-reduces-false-memories-in-depression-a-randomized-controlled-trial-div.pdf",
+     "source": "openalex:best(European Psychiatry)",
+     "app": "PDF",
+     "app_ms": 906,
+     "app_bytes": 589699,
+     "app_final": "https://www.cambridge.org/core/services/aop-cambridge-core/content/view/B2FB9203EA185CC26E1608CE71F08409/S0924933800008567a.pdf/div-class-title-metacognitive-training-for-depression-d-mct-reduces-false-memories-in-depression-a-randomized-controlled-trial-div.pdf",
+     "app_chain": 0,
+     "version": "publishedVersion"
+    }
+   ],
+   "got": {
+    "source": "openalex:best(European Psychiatry)",
+    "version": "publishedVersion",
+    "bytes": 589699,
+    "by": "app-ua"
+   }
+  },
+  {
+   "doi": "10.1093/ejcts/ezae297",
+   "label": "medicine/bronze",
+   "meta": {
+    "openalex_content_pdf": true,
+    "openalex": {
+     "is_oa": true,
+     "status": "bronze",
+     "best_pdf": "https://academic.oup.com/ejcts/article-pdf/66/4/ezae297/59882495/ezae297.pdf",
+     "n_pdf_locations": 1
+    },
+    "unpaywall": {
+     "is_oa": true,
+     "status": "bronze",
+     "best_pdf": "https://academic.oup.com/ejcts/article-pdf/66/4/ezae297/59882495/ezae297.pdf",
+     "n_locations": 1
+    },
+    "semanticscholar": {
+     "is_oa": true,
+     "pdf": "https://academic.oup.com/ejcts/article-pdf/66/4/ezae297/59882495/ezae297.pdf",
+     "arxiv": null,
+     "pmc": null
+    },
+    "europepmc": {
+     "pmcid": null,
+     "isOpenAccess": "N",
+     "inPMC": "N",
+     "pdf_urls": []
+    }
+   },
+   "candidates": 1,
+   "attempts": [
+    {
+     "url": "https://academic.oup.com/ejcts/article-pdf/66/4/ezae297/59882495/ezae297.pdf",
+     "source": "openalex:best(European Journal of Cardio-Thoracic Surgery)",
+     "app": "HTTP 403",
+     "app_ms": 39,
+     "app_bytes": 0,
+     "app_final": "https://academic.oup.com/ejcts/article-pdf/66/4/ezae297/59882495/ezae297.pdf",
+     "app_chain": 0,
+     "browser": "HTTP 403",
+     "browser_bytes": 0,
+     "version": "publishedVersion"
+    }
+   ],
+   "got": null
+  },
+  {
+   "doi": "10.1016/j.jadohealth.2018.10.030",
+   "label": "medicine/bronze",
+   "meta": {
+    "openalex_content_pdf": true,
+    "openalex": {
+     "is_oa": true,
+     "status": "bronze",
+     "best_pdf": "http://www.jahonline.org/article/S1054139X18304919/pdf",
+     "n_pdf_locations": 2
+    },
+    "unpaywall": {
+     "is_oa": true,
+     "status": "bronze",
+     "best_pdf": "http://www.jahonline.org/article/S1054139X18304919/pdf",
+     "n_locations": 2
+    },
+    "semanticscholar": {
+     "is_oa": true,
+     "pdf": "http://www.jahonline.org/article/S1054139X18304919/pdf",
+     "arxiv": null,
+     "pmc": null
+    },
+    "europepmc": {
+     "found": false
+    }
+   },
+   "candidates": 2,
+   "attempts": [
+    {
+     "url": "http://www.jahonline.org/article/S1054139X18304919/pdf",
+     "source": "openalex:best(Journal of Adolescent Health)",
+     "app": "HTTP 403",
+     "app_ms": 95,
+     "app_bytes": 0,
+     "app_final": "http://www.jahonline.org/article/S1054139X18304919/pdf",
+     "app_chain": 1,
+     "browser": "HTTP 403",
+     "browser_bytes": 0,
+     "version": "publishedVersion"
+    },
+    {
+     "url": "https://utoronto.scholaris.ca/bitstreams/b8c8787f-974a-4524-937f-ada5164ba50e/download",
+     "source": "openalex:TSpace (University of Toronto)",
+     "app": "PDF",
+     "app_ms": 1984,
+     "app_bytes": 5258457,
+     "app_final": "https://utoronto.scholaris.ca/server/api/core/bitstreams/b8c8787f-974a-4524-937f-ada5164ba50e/content",
+     "app_chain": 1,
+     "version": "submittedVersion"
+    }
+   ],
+   "got": {
+    "source": "openalex:TSpace (University of Toronto)",
+    "version": "submittedVersion",
+    "bytes": 5258457,
+    "by": "app-ua"
+   }
+  }
+ ],
+ "content": {
+  "when": "2026-09-30T04:19:33Z",
+  "results": [
+   {
+    "doi": "10.1007/s11192-009-0146-3",
+    "work": "W2150220236",
+    "verdict": "PDF",
+    "status": 200,
+    "bytes": 937111,
+    "ms": 659,
+    "direct": true,
+    "eof": true,
+    "pages": 16,
+    "title": ""
+   },
+   {
+    "doi": "10.1371/journal.pone.0166578",
+    "work": "W2550066059",
+    "verdict": "PDF",
+    "status": 200,
+    "bytes": 1174873,
+    "ms": 685,
+    "direct": true,
+    "eof": true,
+    "pages": 14,
+    "title": "Identification of the Core Set of Carbon-Associate"
+   },
+   {
+    "doi": "10.1038/nature12373",
+    "work": "W2159974629",
+    "verdict": "PDF",
+    "status": 200,
+    "bytes": 1031677,
+    "ms": 554,
+    "direct": true,
+    "eof": true,
+    "pages": 7,
+    "title": "Nanometre-scale thermometry in a living cell"
+   },
+   {
+    "doi": "10.1162/qss_a_00019",
+    "work": "W3001554335",
+    "verdict": "PDF",
+    "status": 200,
+    "bytes": 480026,
+    "ms": 874,
+    "direct": true,
+    "eof": true,
+    "pages": 10,
+    "title": "Scopus as a curated, high-quality bibliometric dat"
+   },
+   {
+    "doi": "10.52783/rlj.v11i2.3796",
+    "work": "W4404870646",
+    "verdict": "PDF",
+    "status": 200,
+    "bytes": 502729,
+    "ms": 752,
+    "direct": false,
+    "eof": true,
+    "pages": 9,
+    "title": ""
+   },
+   {
+    "doi": "10.52783/eel.v14i1s.1350",
+    "work": "W4395074853",
+    "verdict": "PDF",
+    "status": 200,
+    "bytes": 796453,
+    "ms": 755,
+    "direct": true,
+    "eof": true,
+    "pages": 19,
+    "title": ""
+   },
+   {
+    "doi": "10.56130/tucbis.1178247",
+    "work": "W4309183660",
+    "verdict": "PDF",
+    "status": 200,
+    "bytes": 949781,
+    "ms": 686,
+    "direct": true,
+    "eof": true,
+    "pages": 8,
+    "title": ""
+   },
+   {
+    "doi": "10.52783/jisem.v9i4.42",
+    "work": "W4411738445",
+    "verdict": "PDF",
+    "status": 200,
+    "bytes": 1147887,
+    "ms": 677,
+    "direct": true,
+    "eof": true,
+    "pages": 21,
+    "title": ""
+   },
+   {
+    "doi": "10.17755/esosder.950426",
+    "work": "W4224247975",
+    "verdict": "PDF",
+    "status": 200,
+    "bytes": 1253212,
+    "ms": 774,
+    "direct": true,
+    "eof": true,
+    "pages": 23,
+    "title": ""
+   },
+   {
+    "doi": "10.52783/jes.2137",
+    "work": "W4395042902",
+    "verdict": "PDF",
+    "status": 200,
+    "bytes": 660682,
+    "ms": 759,
+    "direct": true,
+    "eof": true,
+    "pages": 8,
+    "title": ""
+   },
+   {
+    "doi": "10.3390/membranes12050447",
+    "work": "W4224312710",
+    "verdict": "PDF",
+    "status": 200,
+    "bytes": 34014776,
+    "ms": 1048,
+    "direct": false,
+    "eof": true,
+    "pages": 18,
+    "title": "Construct -FeOOH-Reduced Graphene Oxide Aerogel as",
+    "note": "the probe's first read stopped after 26.3 of 34.0 MB (a dropped connection on this network); a second download was complete: 34,014,776 bytes, 18 pages"
+   },
+   {
+    "doi": "10.3390/membranes14020032",
+    "work": "W4391231754",
+    "verdict": "PDF",
+    "status": 200,
+    "bytes": 4324899,
+    "ms": 663,
+    "direct": false,
+    "eof": true,
+    "pages": 13,
+    "title": "Facilitating Water Permeation in Graphene Oxide Me"
+   },
+   {
+    "doi": "10.3390/membranes13110874",
+    "work": "W4388304784",
+    "verdict": "PDF",
+    "status": 200,
+    "bytes": 1914040,
+    "ms": 930,
+    "direct": false,
+    "eof": true,
+    "pages": 22,
+    "title": "Adsorptive Membranes Incorporating Ionic Liquids ("
+   },
+   {
+    "doi": "10.1088/2053-1591/ab1ffd",
+    "work": "W2944506514",
+    "verdict": "PDF",
+    "status": 200,
+    "bytes": 1252699,
+    "ms": 853,
+    "direct": false,
+    "eof": true,
+    "pages": 9,
+    "title": "Sonication effect on graphene oxide (GO) membranes"
+   },
+   {
+    "doi": "10.1002/admi.201970081",
+    "work": "W2954840823",
+    "verdict": "PDF",
+    "status": 200,
+    "bytes": 4320614,
+    "ms": 965,
+    "direct": false,
+    "eof": true,
+    "pages": 1,
+    "title": "Graphene Oxide Membranes: Pressure\u2010Driven Solven"
+   },
+   {
+    "doi": "10.1002/aic.17865",
+    "work": "W4292170648",
+    "verdict": "PDF",
+    "status": 200,
+    "bytes": 3463051,
+    "ms": 878,
+    "direct": false,
+    "eof": true,
+    "pages": 18,
+    "title": "Transport properties of graphene oxide nanofiltrat"
+   },
+   {
+    "doi": "10.1186/s13561-020-00273-0",
+    "work": "W3034687053",
+    "verdict": "PDF",
+    "status": 200,
+    "bytes": 1001668,
+    "ms": 678,
+    "direct": true,
+    "eof": true,
+    "pages": 11,
+    "title": "Health economic evaluation of an internet interven"
+   },
+   {
+    "doi": "10.1186/s13063-019-3815-4",
+    "work": "W2998958161",
+    "verdict": "PDF",
+    "status": 200,
+    "bytes": 896886,
+    "ms": 999,
+    "direct": true,
+    "eof": true,
+    "pages": 14,
+    "title": "Metta-based group meditation and individual cognit"
+   },
+   {
+    "doi": "10.1002/da.22788",
+    "work": "W2887982140",
+    "verdict": "PDF",
+    "status": 200,
+    "bytes": 607775,
+    "ms": 734,
+    "direct": false,
+    "eof": true,
+    "pages": 11,
+    "title": "Mindfulness\u2010based cognitive therapy for patients"
+   },
+   {
+    "doi": "10.1002/da.23249",
+    "work": "W4220948872",
+    "verdict": "PDF",
+    "status": 200,
+    "bytes": 873130,
+    "ms": 743,
+    "direct": false,
+    "eof": true,
+    "pages": 13,
+    "title": "Meditation\u2010based lifestyle modification in mild "
+   },
+   {
+    "doi": "10.1016/j.eurpsy.2018.05.010",
+    "work": "W2807356290",
+    "verdict": "PDF",
+    "status": 200,
+    "bytes": 559354,
+    "ms": 758,
+    "direct": true,
+    "eof": true,
+    "pages": 6,
+    "title": "Metacognitive Training for Depression (D-MCT) redu"
+   },
+   {
+    "doi": "10.1093/ejcts/ezae297",
+    "work": "W4401386110",
+    "verdict": "PDF",
+    "status": 200,
+    "bytes": 871464,
+    "ms": 701,
+    "direct": false,
+    "eof": true,
+    "pages": 7,
+    "title": "Gender gap in cardiothoracic surgery randomized co"
+   },
+   {
+    "doi": "10.1016/j.jadohealth.2018.10.030",
+    "work": "W2910518544",
+    "verdict": "PDF",
+    "status": 200,
+    "bytes": 73101,
+    "ms": 548,
+    "direct": true,
+    "eof": true,
+    "pages": 2,
+    "title": "16. Mobile Phone-Based Peer Support In The Prevent"
+   }
+  ],
+  "budget_before": {
+   "daily_budget_usd": 1,
+   "daily_remaining_usd": 0.99,
+   "resets_in_seconds": 70827
+  },
+  "errors": [
+   {
+    "case": "no key",
+    "status": 401,
+    "ctype": "application/json",
+    "body": "{\"error\":\"API key required\",\"message\":\"Content downloads require an API key. Get one free at https://openalex.org/users\"}",
+    "verdict": "HTTP 401"
+   },
+   {
+    "case": "wrong key",
+    "status": 401,
+    "ctype": "application/json",
+    "body": "{\"error\":\"Invalid or missing API key\",\"message\":\"API key not found\"}",
+    "verdict": "HTTP 401"
+   },
+   {
+    "case": "no cached copy (W4402851183)",
+    "status": 200,
+    "ctype": "application/pdf",
+    "body": "%PDF-1.7\r%\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\r\r1321 0 obj\r<< /T 7852702 /L 7879278 /Linearized 1 /E 232076 /O 1324 /H\r[ 2860 785\r] /N 13\r>>\rendobj                 ",
+    "verdict": "PDF"
+   },
+   {
+    "case": "unknown work (W1)",
+    "status": 404,
+    "ctype": "application/json",
+    "body": "{\"error\":\"Work not found in content index\",\"work_id\":\"W1\"}",
+    "verdict": "HTTP 404"
+   }
+  ],
+  "budget_after": {
+   "daily_budget_usd": 1,
+   "daily_remaining_usd": 0.75,
+   "resets_in_seconds": 70786
+  },
+  "engine_check": "every downloaded file was opened with PDFium (page count > 0)"
+ }
+}

@@ -1,0 +1,49 @@
+# Citation metadata (https://citation-file-format.github.io). GitHub shows a "Cite this repository" button from it.
+# Fill in the author names and, after the first release, the DOI (Zenodo can mint one from a GitHub release).
+cff-version: 1.2.0
+message: "If you use this software in your research, please cite it as below."
+type: software
+title: "VOSStudio Native"
+abstract: "A native Windows application for bibliometric mapping: co-occurrence, co-authorship, citation and coupling maps from Web of Science, Scopus, RIS, BibTeX and OpenAlex data, with clustering, overlays, trends, comparison, cleaning, publication figures and AI-written reports."
+version: 1.19.0
+date-released: 2026-09-30
+license: MIT
+repository-code: "https://github.com/boss-babby/VosStudio"
+keywords:
+  - bibliometrics
+  - science mapping
+  - co-occurrence networks
+  - VOS layout
+  - Leiden clustering
+authors:
+  - family-names: "TODO-Surname"
+    given-names: "TODO-Given"
+    # orcid: "https://orcid.org/0000-0000-0000-0000"
+references:
+  - type: article
+    title: "Software survey: VOSviewer, a computer program for bibliometric mapping"
+    authors:
+      - family-names: "van Eck"
+        given-names: "Nees Jan"
+      - family-names: "Waltman"
+        given-names: "Ludo"
+    journal: "Scientometrics"
+    volume: 84
+    issue: 2
+    year: 2010
+    start: 523
+    end: 538
+    doi: "10.1007/s11192-009-0146-3"
+  - type: article
+    title: "From Louvain to Leiden: guaranteeing well-connected communities"
+    authors:
+      - family-names: "Traag"
+        given-names: "V. A."
+      - family-names: "Waltman"
+        given-names: "L."
+      - family-names: "van Eck"
+        given-names: "N. J."
+    journal: "Scientific Reports"
+    volume: 9
+    year: 2019
+    doi: "10.1038/s41598-019-41695-z"

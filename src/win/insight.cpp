@@ -33,7 +33,7 @@ string clockNow() {
 void App::updateWindowTitle() {
   string t;
   if (!P->path.empty()) t = fileName(P->path) + (P->dirty ? " \xE2\x80\xA2" : "") + " - VOSStudio";
-  else if (hasCorpus()) t = string("Untitled project") + (P->dirty ? " \xE2\x80\xA2" : "") + " - VOSStudio";
+  else if (hasCorpus() || hasMap() || P->library.hasData() || !wdoc.empty()) t = string("Untitled project") + (P->dirty ? " \xE2\x80\xA2" : "") + " - VOSStudio";
   else t = "VOSStudio";
   if (t == windowTitle_) return;
   windowTitle_ = t;
@@ -44,6 +44,7 @@ void App::updateWindowTitle() {
 // panel slide animation (≈200 ms, only renders while moving; off when Windows animations are off)
 // =====================================================================================
 bool App::canInspect() const {
+  if (readerOpen) return false;  // the reader has its own side pane
   if (page == PG_AI) return docPreview >= 0 && hasCorpus();  // the assistant gets the full width; an open document preview still shows
   return hasMap() || (docPreview >= 0 && hasCorpus());
 }
@@ -162,86 +163,24 @@ void App::mapsFromProject() {
 void App::drawTopLeft(float& xEnd) {
   float s = ui.s;
   float x = 10 * s, y = topR.y + 10 * s, bh = 32 * s;
-  // ---- file menu
-  Rect fb{x, y, 46 * s, bh};
-  uint64_t fid = ui.id("tl:file");
-  bool hov = false;
-  if (ui.behave(fid, fb, &hov)) { if (ui.isPopupOpen("filemenu")) ui.closePopup(); else ui.openPopup("filemenu"); }
-  bool fopen = ui.isPopupOpen("filemenu");
-  if (hov || fopen) ui.fill(fb, ui.c.hover, 7 * s);
-  ui.icon("folder", fb.x + 16 * s, fb.y + bh / 2, 17 * s, hov || fopen ? ui.c.text : ui.c.textDim, 1.7f);
-  ui.icon("chev-down", fb.x + 34 * s, fb.y + bh / 2 + 1 * s, 11 * s, ui.c.textFaint, 2.f);
-  ui.tipFor(fid, "Open data or a project, new project, export, recent files");
-  if (fopen) {
-    ui.overlay([this, fb, s]() {
-      struct It { const char* icon; const char* label; const char* key; int cmd; };
-      static const It items[] = {{"folder", "Open data\xE2\x80\xA6", "Ctrl+O", 0}, {"file", "Open project\xE2\x80\xA6", "Ctrl+Shift+O", 1}, {"plus", "New project", "Ctrl+N", 2},
-                                 {"save", "Save project as\xE2\x80\xA6", "Ctrl+Shift+S", 3}, {"sparkle", "Load the sample data", "", 4},
-                                 {"download", "", "Ctrl+Shift+E", 5}, {"publish", "Publication figure\xE2\x80\xA6", "Ctrl+E", 6},
-                                 {"settings", "Settings\xE2\x80\xA6", "Ctrl+,", 7}};
-      const int NI = 8;
-      auto rec = settings.recent();
-      size_t nr = std::min<size_t>(6, rec.size());
-      float rowH = 30 * s;
-      Rect pr{fb.x, fb.b() + 4 * s, 290 * s, 8 * s + NI * rowH + 18 * s + (nr ? 30 * s + nr * rowH : 0) + 6 * s};
-      ui.shadow(pr, 8 * s);
-      ui.fill(pr, ui.c.panel2, 8 * s);
-      ui.stroke(pr, ui.c.border, 8 * s);
-      ui.popupRect(pr);
-      float yy = pr.y + 4 * s;
-      for (int i = 0; i < NI; i++) {
-        if (i == 5 || i == 7) { ui.line(pr.x + 10 * s, yy + 4 * s, pr.r() - 10 * s, yy + 4 * s, ui.c.border); yy += 9 * s; }
-        Rect rr{pr.x + 4 * s, yy, pr.w - 8 * s, rowH - 2 * s};
-        bool en = i == 3 ? hasCorpus() : (i == 5 || i == 6) ? hasMap() : true;
-        string label = i == 5 ? "Export the " + viewName(view) + " view\xE2\x80\xA6" : string(items[i].label);
-        if (ui.listRow(rr, string("fm") + std::to_string(i), false) && en) {
-          ui.closePopup();
-          switch (items[i].cmd) {
-            case 0: cmdOpenFiles(); break;
-            case 1: cmdOpenProject(); break;
-            case 2: cmdNewProject(); break;
-            case 3: cmdSaveProject(true); break;
-            case 4: cmdSample(false); break;
-            case 5: cmdExportCurrentView(""); break;
-            case 6: page = PG_PUBLISH; break;
-            case 7: settingsWanted = true; break;
-          }
-        }
-        Color fg = en ? ui.c.text : ui.c.textFaint;
-        ui.icon(items[i].icon, rr.x + 14 * s, rr.y + rr.h / 2, 15 * s, en ? ui.c.textDim : ui.c.textFaint, 1.6f);
-        ui.text({rr.x + 32 * s, rr.y, rr.w - 120 * s, rr.h}, label, 12.5f * s, fg);
-        ui.text({rr.r() - 100 * s, rr.y, 92 * s, rr.h}, items[i].key, 11 * s, ui.c.textFaint, AL_RIGHT);
-        yy += rowH;
-      }
-      if (nr) {
-        ui.line(pr.x + 10 * s, yy + 6 * s, pr.r() - 10 * s, yy + 6 * s, ui.c.border);
-        ui.text({pr.x + 14 * s, yy + 10 * s, pr.w, 18 * s}, "Recent projects", 12 * s, ui.c.textFaint, AL_LEFT, 600);
-        yy += 30 * s;
-        for (size_t i = 0; i < nr; i++) {
-          Rect rr{pr.x + 4 * s, yy, pr.w - 8 * s, rowH - 2 * s};
-          if (ui.listRow(rr, "fr" + std::to_string(i), false)) { ui.closePopup(); cmdOpenProject(rec[i]); return; }
-          ui.icon("clock", rr.x + 14 * s, rr.y + rr.h / 2, 14 * s, ui.c.textFaint, 1.6f);
-          ui.text({rr.x + 32 * s, rr.y, rr.w - 40 * s, rr.h}, fileName(rec[i]), 12.5f * s, ui.c.text);
-          ui.tip(rec[i]);
-          yy += rowH;
-        }
-      }
-    });
-  }
-  x = fb.r() + 2 * s;
+  // ---- menu bar (menus.cpp)
+  drawMenuBar(x);
   // ---- save, undo, redo
-  if (ui.iconButton({x, y, 32 * s, bh}, "save", P->dirty ? "Save project  (Ctrl+S)\nUnsaved changes" : "Save project  (Ctrl+S)", false, hasCorpus())) cmdSaveProject(false);
-  if (P->dirty && hasCorpus()) ui.circle(x + 25 * s, y + 8 * s, 3 * s, ui.c.accent);
+  bool canSave = hasCorpus() || hasMap() || !wdoc.empty() || P->library.hasData();
+  if (ui.iconButton({x, y, 32 * s, bh}, "save", P->dirty ? "Save project  (Ctrl+S)\nUnsaved changes" : "Save project  (Ctrl+S)", false, canSave)) cmdSaveProject(false);
+  if (P->dirty && canSave) ui.circle(x + 25 * s, y + 8 * s, 3 * s, ui.c.accent);
   x += 34 * s;
   if (ui.iconButton({x, y, 32 * s, bh}, "undo", "Undo  (Ctrl+Z)" + (undoStack.empty() ? string() : ": " + undoStack.back().what), false, !undoStack.empty())) undo();
   x += 34 * s;
   if (ui.iconButton({x, y, 32 * s, bh}, "redo", "Redo  (Ctrl+Y)" + (redoStack.empty() ? string() : ": " + redoStack.back().what), false, !redoStack.empty())) redo();
-  x += 34 * s + 8 * s;
-  ui.line(x, y + 6 * s, x, y + bh - 6 * s, ui.c.border);
-  x += 9 * s;
-  // ---- map switcher
-  float cw = clampv(topR.w * 0.17f, 150 * s, 270 * s);
-  Rect chip{x, y, cw, bh};
+  x += 34 * s;
+  xEnd = x + 4 * s;
+}
+
+// the map chip (title, item count, the maps of this session) — in the right-hand block of the top bar
+void App::drawMapChip(const Rect& chip) {
+  float s = ui.s;
+  const float bh = chip.h;
   uint64_t mid = ui.id("tl:maps");
   bool mh = false;
   if (ui.behave(mid, chip, &mh)) {
@@ -299,7 +238,6 @@ void App::drawTopLeft(float& xEnd) {
       if (ui.button({pr.x + 8 * s, pr.b() - 40 * s, pr.w - 16 * s, 32 * s}, "Build another map\xE2\x80\xA6", BTN_GHOST, "plus", hasCorpus())) { ui.closePopup(); page = PG_BUILD; }
     });
   }
-  xEnd = chip.r() + 12 * s;
 }
 
 // =====================================================================================
@@ -432,6 +370,18 @@ void App::drawDocPreview(Lay& L) {
   if (ui.button(a2[0], "Copy DOI", BTN_GHOST, "copy", hasDoi)) { setClipboardText(hwnd, "https://doi.org/" + r.doi); ui.toast("Copied", r.doi, 1, 1.6); }
   if (ui.button(a2[1], "Copy title", BTN_GHOST, "copy", !r.title.empty())) { setClipboardText(hwnd, r.title); ui.toast("Copied", truncate(r.title, 60), 1, 1.6); }
   if (ui.button(L.row(30 * s), "Summarise with AI", BTN_NORMAL, "sparkle", !aiLive)) { aiDoc = docPreview; aiRun(ai::Task::Document); }
+  {  // the paper's PDF: read it here, or attach it (Read stage)
+    const PdfItem* pi = readerItemForRecord(docPreview);
+    Rect br = L.row(30 * s);
+    if (pi) {
+      string lbl = string("Read the PDF") + (pi->annotCount() ? "  \xC2\xB7  " + plural(pi->annotCount(), "highlight") : string()) + "  \xC2\xB7  " + statusName(pi->status);
+      if (ui.button(br, lbl, BTN_NORMAL, "book")) openReader(pi->id);
+      ui.tip("Open in the reader: highlight, code and annotate; quote and cite into the report");
+    } else {
+      if (ui.button(br, "Attach the PDF\xE2\x80\xA6", BTN_GHOST, "book")) readerAttachDialog(docPreview);
+      ui.tip("Attach the full text of this paper to read it here (or drop the PDF onto the window)");
+    }
+  }
   // abstract (collapsible)
   if (!r.abstract_.empty()) {
     sectionTitle(L, "Abstract");

@@ -4,6 +4,8 @@
 
 #include <cstdio>
 #include <sstream>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace vs {
 
@@ -102,6 +104,30 @@ static string firstNumber(const string& s) {
 }
 
 // WoS C1: "[Smith, J; Doe, A] Stanford Univ, Dept X, Stanford, CA 94305 USA."
+// "Surname, First/0000-0001-2345-6789; Other, N/A-1234-2010" (WoS OI and RI fields) -> r.authorIds by name match
+static void wosIdentifiers(const string& text, Record& r, const string& prefix) {
+  auto nameKey = [](const string& n) {
+    vector<string> p = split(lower(asciiFold(n)), ',');
+    string sur, ini;
+    for (char c : p[0]) if (isalpha(uint8_t(c))) sur += c;
+    if (p.size() > 1) { string f = trim(p[1]); if (!f.empty()) ini = f[0]; }
+    return sur + "|" + ini;
+  };
+  if (r.authorIds.size() != r.authors.size()) r.authorIds.assign(r.authors.size(), "");
+  for (auto& part : splitAny(text, ";")) {
+    size_t sl = part.rfind('/');
+    if (sl == string::npos) continue;
+    string name = trim(part.substr(0, sl)), id = trim(part.substr(sl + 1));
+    if (name.empty() || id.empty()) continue;
+    string k = nameKey(name);
+    for (size_t i = 0; i < r.authors.size(); i++) {
+      if (nameKey(r.authors[i]) != k) continue;
+      if (r.authorIds[i].empty() || (prefix.empty() && !r.authorIds[i].empty() && r.authorIds[i].compare(0, 4, "rid:") == 0)) r.authorIds[i] = prefix + id;  // ORCID wins over ResearcherID
+      break;
+    }
+  }
+}
+
 static void wosAffiliation(const string& line, Record& r) {
   string s = trim(line);
   if (!s.empty() && s[0] == '[') {
@@ -114,6 +140,8 @@ static void wosAffiliation(const string& line, Record& r) {
   string c = parts.back();
   addUnique(r.countries, normCountry(c));
 }
+
+static void parseExtraJson(const string& text, Record& r);
 
 // ------------------------------------------------------------ WoS plain text
 static int parseWoS(const string& text, vector<Record>& out) {
@@ -145,11 +173,21 @@ static int parseWoS(const string& text, vector<Record>& out) {
       else if (tag == "TC") r.cites = toInt(joined);
       else if (tag == "Z9" && r.cites == 0) r.cites = toInt(joined);
       else if (tag == "VL") r.volume = joined;
+      else if (tag == "IS") r.issue = joined;
       else if (tag == "BP") r.pages = joined;
+      else if (tag == "UR") r.url = joined;
       else if (tag == "DT") r.docType = joined;
       else if (tag == "LA") r.language = joined;
       else if (tag == "PU") r.publisher = joined;
       else if (tag == "UT") r.key = joined;
+      else if (tag == "OI") wosIdentifiers(joined, r, "");
+      else if (tag == "RI") wosIdentifiers(joined, r, "rid:");
+      else if (tag == "VS" && startsWith(joined, "VOSStudioExtra:")) parseExtraJson(trim(joined.substr(15)), r);
+      else if (tag != "PT" && tag != "ER" && tag != "FN" && tag != "VR" && tag != "EF") {
+        string& extra = r.extra[tag];
+        if (!extra.empty()) extra += '\n';
+        extra += joined;
+      }
     }
     cur.clear();
   };
@@ -210,6 +248,41 @@ vector<vector<string>> parseCsv(const string& text, char sep) {
   return rows;
 }
 
+static string extraJson(const std::map<string, string>& extra) {
+  Json j = Json::object();
+  for (const auto& kv : extra) j.set(kv.first, kv.second);
+  return j.dump();
+}
+static string stringListBlob(const vector<string>& values) {
+  Json j = Json::array();
+  for (const string& value : values) j.push(value);
+  return "V1:" + base64(j.dump());
+}
+static bool parseStringListBlob(const string& text, vector<string>& out) {
+  if (!startsWith(text, "V1:")) return false;
+  string error;
+  Json j = Json::parse(base64Decode(text.substr(3)), &error);
+  if (!error.empty() || j.t != Json::Arr) return false;
+  vector<string> parsed;
+  for (const Json& value : j.a) {
+    if (value.t != Json::Str) return false;
+    parsed.push_back(value.s);
+  }
+  out.swap(parsed);
+  return true;
+}
+static void parseExtraJson(const string& text, Record& r) {
+  if (trim(text).empty()) return;
+  string err;
+  Json j = Json::parse(text, &err);
+  if (!err.empty() || j.t != Json::Obj) { r.extra["VOSStudio Extra Fields"] = text; return; }
+  for (const auto& kv : j.o) {
+    if (kv.second.t == Json::Str) r.extra[kv.first] = kv.second.s;
+    else r.extra[kv.first] = kv.second.dump();
+  }
+}
+static string jsonValueText(const Json& j) { return j.t == Json::Str ? j.s : j.dump(); }
+
 // ------------------------------------------------------------ WoS tab-delimited
 static int parseWoSTab(const string& text, vector<Record>& out) {
   auto rows = parseCsv(text, '\t');
@@ -225,6 +298,8 @@ static int parseWoSTab(const string& text, vector<Record>& out) {
     auto& row = rows[r];
     Record rec;
     for (auto& a : splitAny(g(row, "AU"), ";")) rec.authors.push_back(bibClean(a));
+    if (!g(row, "OI").empty()) wosIdentifiers(g(row, "OI"), rec, "");
+    if (!g(row, "RI").empty()) wosIdentifiers(g(row, "RI"), rec, "rid:");
     rec.title = g(row, "TI");
     rec.source = g(row, "SO");
     rec.abstract_ = g(row, "AB");
@@ -232,7 +307,12 @@ static int parseWoSTab(const string& text, vector<Record>& out) {
     rec.doi = normDoi(g(row, "DI"));
     rec.cites = toInt(g(row, "TC"));
     rec.volume = g(row, "VL");
+    rec.issue = g(row, "IS");
     rec.pages = g(row, "BP");
+    rec.url = g(row, "URL");
+    rec.publisher = g(row, "PU");
+    rec.key = g(row, "UT");
+    rec.id = g(row, "VOSStudio Record ID");
     rec.docType = g(row, "DT");
     rec.language = g(row, "LA");
     for (auto& k : splitAny(g(row, "DE"), ";")) rec.keywords.push_back(bibClean(k));
@@ -249,6 +329,8 @@ static int parseWoSTab(const string& text, vector<Record>& out) {
       else curAff += ch;
     }
     if (!trim(curAff).empty()) wosAffiliation(curAff, rec);
+    static const std::set<string> known = {"AU", "AF", "TI", "SO", "AB", "PY", "DI", "TC", "VL", "IS", "BP", "EP", "URL", "DT", "LA", "DE", "ID", "CR", "C1", "OI", "RI", "PU", "UT", "VOSStudio Record ID"};
+    for (const auto& kv : col) if (!known.count(kv.first) && kv.second >= 0 && kv.second < int(row.size()) && !trim(row[size_t(kv.second)]).empty()) rec.extra[kv.first] = trim(row[size_t(kv.second)]);
     if (!rec.title.empty() || !rec.authors.empty()) { out.push_back(rec); n++; }
   }
   return n;
@@ -259,29 +341,62 @@ static int parseScopus(const string& text, vector<Record>& out) {
   auto rows = parseCsv(text, ',');
   if (rows.empty()) return 0;
   std::map<string, int> col;
-  for (size_t i = 0; i < rows[0].size(); i++) col[lower(trim(rows[0][i]))] = int(i);
+  vector<string> colNames;
+  colNames.reserve(rows[0].size());
+  for (size_t i = 0; i < rows[0].size(); i++) { colNames.push_back(trim(rows[0][i])); col[lower(colNames.back())] = int(i); }
   auto ci = [&](std::initializer_list<const char*> names) {
     for (auto nm : names) { auto it = col.find(nm); if (it != col.end()) return it->second; }
     return -1;
   };
-  int iAu = ci({"authors"}), iTi = ci({"title"}), iYr = ci({"year"}), iSo = ci({"source title"}), iVol = ci({"volume"}), iPs = ci({"page start"}),
-      iCb = ci({"cited by"}), iDoi = ci({"doi"}), iAb = ci({"abstract"}), iKw = ci({"author keywords"}), iId = ci({"index keywords"}),
+  int iAu = ci({"authors"}), iFullAu = ci({"author full names"}), iTi = ci({"title"}), iYr = ci({"year"}), iSo = ci({"source title"}), iVol = ci({"volume"}), iIssue = ci({"issue", "issue number"}), iPs = ci({"page start", "pages"}),
+      iCb = ci({"cited by"}), iDoi = ci({"doi"}), iUrl = ci({"url", "link"}), iAb = ci({"abstract"}), iKw = ci({"author keywords"}), iId = ci({"index keywords"}),
       iAf = ci({"affiliations"}), iRef = ci({"references"}), iDt = ci({"document type"}), iPub = ci({"publisher"}), iLa = ci({"language of original document"}),
-      iEid = ci({"eid"});
+      iEid = ci({"eid"}), iAid = ci({"author(s) id", "author ids", "author id"}), iRecordId = ci({"vosstudio record id", "local record id", "record id", "vsid"}),
+      iExtra = ci({"vosstudio extra fields", "extra fields"}), iLocalAuthorIds = ci({"vosstudio author ids"});
   auto g = [&](const vector<string>& row, int i) { return i >= 0 && i < int(row.size()) ? trim(row[i]) : string(); };
   int n = 0;
   for (size_t r = 1; r < rows.size(); r++) {
     auto& row = rows[r];
     Record rec;
-    string au = g(row, iAu);
-    if (au.find(';') != string::npos) for (auto& a : splitAny(au, ";")) rec.authors.push_back(bibClean(a));
-    else for (auto& a : splitAny(au, ",")) rec.authors.push_back(bibClean(a));
+    string au = g(row, iFullAu);
+    if (au.empty()) au = g(row, iAu);
+    if (au.find(';') != string::npos) {
+      for (auto& a : splitAny(au, ";")) rec.authors.push_back(bibClean(a));
+    } else if (!trim(au).empty()) {
+      string author = trim(au);
+      // Scopus full-name cells sometimes append a numeric identifier in parentheses;
+      // the parallel Author(s) ID column is parsed separately below.
+      if (!author.empty() && author.back() == ')') {
+        size_t open = author.rfind(" (");
+        if (open != string::npos && open + 2 < author.size() - 1) {
+          bool numericId = true;
+          for (size_t k = open + 2; k + 1 < author.size(); k++) if (!isdigit(uint8_t(author[k]))) numericId = false;
+          if (numericId) author.erase(open);
+        }
+      }
+      rec.authors.push_back(bibClean(author));
+    }
     if (rec.authors.size() == 1 && lower(rec.authors[0]) == "[no author name available]") rec.authors.clear();
+    if (iAid >= 0 && !rec.authors.empty()) {
+      vector<string> ids;
+      for (auto& x : splitAny(g(row, iAid), ";")) { string t = trim(x); if (!t.empty()) ids.push_back("scopus:" + t); }
+      if (ids.size() == rec.authors.size()) rec.authorIds = ids;
+    }
+    string localAuthorIdBlob = g(row, iLocalAuthorIds);
+    if (!localAuthorIdBlob.empty()) {
+      vector<string> localAuthorIds;
+      if (parseStringListBlob(localAuthorIdBlob, localAuthorIds) && localAuthorIds.size() == rec.authors.size()) rec.authorIds = std::move(localAuthorIds);
+      else rec.extra["VOSStudio Author IDs"] = localAuthorIdBlob;
+    }
     rec.title = g(row, iTi);
     rec.year = toInt(g(row, iYr));
     rec.source = g(row, iSo);
     rec.volume = g(row, iVol);
+    rec.issue = g(row, iIssue);
     rec.pages = g(row, iPs);
+    rec.url = g(row, iUrl);
+    rec.id = g(row, iRecordId);
+    parseExtraJson(g(row, iExtra), rec);
     rec.cites = toInt(g(row, iCb));
     rec.doi = normDoi(g(row, iDoi));
     rec.abstract_ = g(row, iAb);
@@ -299,6 +414,11 @@ static int parseScopus(const string& text, vector<Record>& out) {
     rec.publisher = g(row, iPub);
     rec.language = g(row, iLa);
     rec.key = g(row, iEid);
+    static const std::set<string> known = {"authors", "author full names", "title", "year", "source title", "volume", "issue", "issue number", "page start", "pages", "cited by", "doi", "url", "link", "abstract", "author keywords", "index keywords", "affiliations", "references", "document type", "publisher", "language of original document", "eid", "author(s) id", "author ids", "author id", "vosstudio record id", "local record id", "record id", "vsid", "vosstudio extra fields", "extra fields", "vosstudio author ids"};
+    for (size_t ci = 0; ci < colNames.size(); ci++) {
+      const string& fieldName = colNames[ci];
+      if (!known.count(lower(fieldName)) && ci < row.size() && !trim(row[ci]).empty()) rec.extra[fieldName] = trim(row[ci]);
+    }
     if (!rec.title.empty()) { out.push_back(rec); n++; }
   }
   return n;
@@ -319,7 +439,7 @@ static int parseRIS(const string& text, vector<Record>& out) {
     if (t == "TY") { r = Record(); inRec = true; r.docType = v; sp.clear(); ep.clear(); continue; }
     if (!inRec) continue;
     if (t == "ER") {
-      r.pages = sp;
+      r.pages = sp.empty() ? string() : sp + (ep.empty() ? string() : "-" + ep);
       if (!r.title.empty()) { out.push_back(r); n++; }
       inRec = false;
       continue;
@@ -329,9 +449,13 @@ static int parseRIS(const string& text, vector<Record>& out) {
     else if (t == "PY" || t == "Y1" || t == "DA") { if (!r.year) r.year = toInt(firstNumber(v)); }
     else if (t == "JO" || t == "JF" || t == "T2" || t == "JA") { if (r.source.empty()) r.source = v; }
     else if (t == "VL") r.volume = v;
+    else if (t == "IS") r.issue = v;
     else if (t == "SP") sp = v;
     else if (t == "EP") ep = v;
     else if (t == "DO") r.doi = normDoi(v);
+    else if (t == "UR") r.url = v;
+    else if (t == "ID") r.id = v;
+    else if (t == "AN") r.key = v;
     else if (t == "N1" && startsWith(lower(v), "times cited:")) r.cites = toInt(trim(v.substr(12)));
     else if (t == "AB" || t == "N2") { if (r.abstract_.empty()) r.abstract_ = v; }
     else if (t == "KW") { for (auto& k : splitAny(v, ";")) r.keywords.push_back(bibClean(k)); }
@@ -344,6 +468,21 @@ static int parseRIS(const string& text, vector<Record>& out) {
       string num = firstNumber(v.substr(lower(v).find("cited by")));
       if (!num.empty()) r.cites = toInt(num);
     } else if (t == "CR") r.refs.push_back(v);
+    else if (t == "X1" && startsWith(v, "VOSStudioExtra:")) parseExtraJson(trim(v.substr(15)), r);
+    else if (t == "X2" && startsWith(v, "VOSStudioAuthorIds:")) {
+      string blob = trim(v.substr(19)); vector<string> values;
+      if (parseStringListBlob(blob, values) && values.size() == r.authors.size()) r.authorIds = std::move(values);
+      else r.extra[t] = v;
+    } else if (t == "X3" && startsWith(v, "VOSStudioIndexTerms:")) {
+      string blob = trim(v.substr(20)); vector<string> values;
+      if (parseStringListBlob(blob, values)) r.indexTerms = std::move(values);
+      else r.extra[t] = v;
+    }
+    else if (t != "TY" && t != "ER") {
+      string& extra = r.extra[t];
+      if (!extra.empty()) extra += '\n';
+      extra += v;
+    }
   }
   return n;
 }
@@ -411,6 +550,7 @@ static int parseBibTeX(const string& t, vector<Record>& out) {
     i = p;
     auto g = [&](const char* nm) { auto it = f.find(nm); return it == f.end() ? string() : latexClean(it->second); };
     r.title = g("title");
+    if (!g("vosstudiosourcekey").empty()) r.key = g("vosstudiosourcekey");
     string au = g("author");
     string auRaw = f.count("author") ? f["author"] : "";
     for (auto& a : split(replaceAll(latexClean(auRaw), " and ", "\x01"), '\x01')) if (!trim(a).empty()) r.authors.push_back(bibClean(a));
@@ -419,8 +559,22 @@ static int parseBibTeX(const string& t, vector<Record>& out) {
     r.source = g("journal");
     if (r.source.empty()) r.source = g("booktitle");
     r.volume = g("volume");
-    r.pages = firstNumber(g("pages"));
+    r.issue = g("number"); if (r.issue.empty()) r.issue = g("issue");
+    r.pages = g("pages");
     r.doi = normDoi(g("doi"));
+    r.url = g("url");
+    r.id = g("vosstudioid"); if (r.id.empty()) r.id = g("vsid");
+    if (f.count("vosstudioextras")) {
+      string extraBlob = g("vosstudioextras");
+      if (startsWith(extraBlob, "V1:")) parseExtraJson(base64Decode(extraBlob.substr(3)), r);
+      else parseExtraJson(extraBlob, r);
+    }
+    string authorIdBlob = g("vosstudioauthorids");
+    if (!authorIdBlob.empty()) {
+      vector<string> values;
+      if (parseStringListBlob(authorIdBlob, values) && values.size() == r.authors.size()) r.authorIds = std::move(values);
+      else r.extra["vosstudioauthorids"] = authorIdBlob;
+    }
     r.abstract_ = g("abstract");
     string kw = g("author_keywords");
     if (kw.empty()) kw = g("keywords");
@@ -440,6 +594,8 @@ static int parseBibTeX(const string& t, vector<Record>& out) {
     if (!tc.empty()) r.cites = toInt(tc);
     r.publisher = g("publisher");
     r.language = g("language");
+    static const std::set<string> known = {"author", "title", "year", "journal", "booktitle", "volume", "number", "issue", "pages", "doi", "url", "abstract", "author_keywords", "keywords", "keywords-plus", "affiliations", "affiliation", "references", "cited-references", "note", "times-cited", "publisher", "language", "vosstudioid", "vsid", "vosstudioextras", "vosstudiosourcekey", "vosstudioauthorids"};
+    for (const auto& kv : f) if (!known.count(kv.first) && !trim(kv.second).empty()) r.extra[kv.first] = kv.second;
     if (!r.title.empty()) { out.push_back(r); n++; }
   }
   return n;
@@ -460,10 +616,21 @@ int parseOpenAlex(const Json& j, vector<Record>& out) {
     r.language = w["language"].str();
     const Json& loc = w["primary_location"];
     r.source = loc["source"]["display_name"].str();
+    r.url = loc["landing_page_url"].str(); if (r.url.empty()) r.url = w["primary_location"]["pdf_url"].str();
     r.volume = w["biblio"]["volume"].str();
-    r.pages = w["biblio"]["first_page"].str();
+    r.issue = w["biblio"]["issue"].str();
+    string fp = w["biblio"]["first_page"].str(), lp = w["biblio"]["last_page"].str();
+    r.pages = fp + (lp.empty() || lp == fp ? string() : "-" + lp);
     for (auto& a : w["authorships"].a) {
       r.authors.push_back(a["author"]["display_name"].str());
+      {
+        string orcid = a["author"]["orcid"].str(), aid = a["author"]["id"].str();
+        size_t p1 = orcid.rfind('/');
+        if (p1 != string::npos) orcid = orcid.substr(p1 + 1);
+        size_t p2 = aid.rfind('/');
+        if (p2 != string::npos) aid = aid.substr(p2 + 1);
+        r.authorIds.push_back(!orcid.empty() ? orcid : aid.empty() ? string() : "openalex:" + aid);
+      }
       for (auto& inst : a["institutions"].a) {
         addUnique(r.affiliations, inst["display_name"].str());
         string cc = inst["country_code"].str();
@@ -486,8 +653,11 @@ int parseOpenAlex(const Json& j, vector<Record>& out) {
       for (auto& wd : words) { if (!ab.empty()) ab += ' '; ab += wd.second; }
       r.abstract_ = ab;
     }
+    static const std::set<string> known = {"id", "title", "display_name", "publication_year", "doi", "cited_by_count", "type", "language", "primary_location", "biblio", "authorships", "keywords", "concepts", "referenced_works", "abstract_inverted_index"};
+    for (const auto& kv : w.o) if (!known.count(kv.first)) r.extra[kv.first] = kv.second.dump();
     if (!r.title.empty()) { out.push_back(r); n++; }
   }
+  ensureRecordIds(out);
   return n;
 }
 
@@ -533,43 +703,216 @@ BibFormat detectFormat(const string& text, const string& name) {
 }
 
 int parseRecords(const string& text, BibFormat fmt, vector<Record>& out, string* err) {
+  int n = 0;
   switch (fmt) {
-    case BibFormat::WoS: return parseWoS(text, out);
-    case BibFormat::WoSTab: return parseWoSTab(text, out);
-    case BibFormat::Scopus: return parseScopus(text, out);
-    case BibFormat::RIS: return parseRIS(text, out);
-    case BibFormat::BibTeX: return parseBibTeX(text, out);
+    case BibFormat::WoS: n = parseWoS(text, out); break;
+    case BibFormat::WoSTab: n = parseWoSTab(text, out); break;
+    case BibFormat::Scopus: n = parseScopus(text, out); break;
+    case BibFormat::RIS: n = parseRIS(text, out); break;
+    case BibFormat::BibTeX: n = parseBibTeX(text, out); break;
     case BibFormat::OpenAlex: {
       string e;
       Json j = Json::parse(text, &e);
       if (!e.empty()) { if (err) *err = "JSON: " + e; return 0; }
-      return parseOpenAlex(j, out);
+      n = parseOpenAlex(j, out);
+      break;
     }
     default:
       if (err) *err = "unrecognised file format";
       return 0;
   }
+  if (n > 0) ensureRecordIds(out);
+  return n;
 }
 
-// ------------------------------------------------------------ dedup
-int deduplicate(vector<Record>& recs) {
-  std::unordered_set<string> dois, titles;
-  vector<Record> keep;
-  keep.reserve(recs.size());
-  int removed = 0;
-  for (auto& r : recs) {
-    string d = normDoi(r.doi);
-    string tk;
-    for (char c : lower(asciiFold(r.title))) if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) tk += c;
-    tk += "|" + std::to_string(r.year);
-    bool dup = (!d.empty() && dois.count(d)) || (tk.size() > 12 && titles.count(tk));
-    if (dup) { removed++; continue; }
-    if (!d.empty()) dois.insert(d);
-    if (tk.size() > 12) titles.insert(tk);
-    keep.push_back(std::move(r));
+// ------------------------------------------------------------ stable local identities and explicit duplicate review
+string stableRecordId(const Record& r, uint64_t ordinal) {
+  if (!r.id.empty()) return r.id;
+  string doi = lower(trim(r.doi));
+  if (startsWith(doi, "https://doi.org/")) doi.erase(0, 16);
+  else if (startsWith(doi, "http://doi.org/")) doi.erase(0, 15);
+  else if (startsWith(doi, "doi:")) doi.erase(0, 4);
+  string seed;
+  if (!doi.empty()) seed = "doi:" + doi;
+  else if (!trim(r.key).empty()) seed = "source-key:" + trim(r.key);
+  else if (!trim(r.title).empty()) {
+    seed = "record-v1|" + lower(asciiFold(collapseWs(trim(r.title)))) + "|" + std::to_string(r.year) + "|" + lower(asciiFold(collapseWs(trim(r.source))));
+    for (const string& a : r.authors) seed += "|" + lower(asciiFold(collapseWs(trim(a))));
+  } else seed = "opaque-record:" + std::to_string(ordinal) + "|" + std::to_string(r.src);
+  return "rec:" + sha256Hex(seed).substr(0, 32);
+}
+
+size_t ensureRecordIds(vector<Record>& recs, const std::unordered_set<string>& reserved) {
+  std::unordered_set<string> used = reserved;
+  used.reserve(used.size() + recs.size());
+  size_t changed = 0;
+  for (size_t i = 0; i < recs.size(); i++) {
+    Record& r = recs[i];
+    string prior = r.id;
+    if (r.id.empty()) r.id = stableRecordId(r, uint64_t(i));
+    if (!used.insert(r.id).second) {
+      const string duplicate = r.id;
+      uint64_t salt = uint64_t(i);
+      do {
+        string seed = "vosstudio-record-id-collision-v1|" + duplicate + "|" + std::to_string(salt++);
+        r.id = "rec:" + sha256Hex(seed).substr(0, 32);
+      } while (!used.insert(r.id).second);
+    }
+    if (prior != r.id) changed++;
   }
-  recs.swap(keep);
-  return removed;
+  return changed;
+}
+
+vector<RecordDuplicateGroup> recordDuplicateGroups(const vector<Record>& recs) {
+  const int n = int(recs.size());
+  vector<int> parent(static_cast<size_t>(n), 0);
+  for (int i = 0; i < n; i++) parent[size_t(i)] = i;
+  auto root = [&](int x) {
+    int r = x;
+    while (parent[size_t(r)] != r) r = parent[size_t(r)];
+    while (parent[size_t(x)] != x) { int next = parent[size_t(x)]; parent[size_t(x)] = r; x = next; }
+    return r;
+  };
+  auto unite = [&](int a, int b) { int ra = root(a), rb = root(b); if (ra != rb) parent[size_t(rb)] = ra; };
+  std::unordered_map<string, int> doiFirst, titleFirst;
+  for (int i = 0; i < n; i++) {
+    const Record& r = recs[size_t(i)];
+    string doi = normDoi(r.doi);
+    if (!doi.empty()) {
+      auto it = doiFirst.emplace(doi, i);
+      if (!it.second) unite(i, it.first->second);
+    }
+    string title;
+    for (char c : lower(asciiFold(r.title))) if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) title += c;
+    if (title.size() > 12) {
+      string key = title + "|" + std::to_string(r.year);
+      auto it = titleFirst.emplace(key, i);
+      if (!it.second) unite(i, it.first->second);
+    }
+  }
+  std::map<int, vector<int>> grouped;
+  for (int i = 0; i < n; i++) grouped[root(i)].push_back(i);
+  vector<RecordDuplicateGroup> out;
+  for (auto& kv : grouped) if (kv.second.size() > 1) {
+    RecordDuplicateGroup group;
+    group.indices = std::move(kv.second);
+    for (size_t a = 0; a < group.indices.size() && !group.hasDoiMatch; a++) {
+      string da = normDoi(recs[size_t(group.indices[a])].doi);
+      if (da.empty()) continue;
+      for (size_t b = a + 1; b < group.indices.size(); b++) if (da == normDoi(recs[size_t(group.indices[b])].doi)) { group.hasDoiMatch = true; break; }
+    }
+    out.push_back(std::move(group));
+  }
+  std::sort(out.begin(), out.end(), [](const RecordDuplicateGroup& a, const RecordDuplicateGroup& b) { return a.indices.front() < b.indices.front(); });
+  return out;
+}
+
+vector<RecordFieldConflict> recordMergeConflicts(const Record& keep, const Record& merge) {
+  vector<RecordFieldConflict> conflicts;
+  auto field = [&](const string& name, const string& a, const string& b) {
+    if (!a.empty() && !b.empty() && a != b) conflicts.push_back({name, a, b});
+  };
+  auto list = [](const vector<string>& values) { return join(values, "; "); };
+  field("title", keep.title, merge.title);
+  field("authors", list(keep.authors), list(merge.authors));
+  field("author identifiers", list(keep.authorIds), list(merge.authorIds));
+  field("year", keep.year ? std::to_string(keep.year) : string(), merge.year ? std::to_string(merge.year) : string());
+  field("source", keep.source, merge.source);
+  field("document type", keep.docType, merge.docType);
+  field("DOI", keep.doi, merge.doi);
+  field("URL", keep.url, merge.url);
+  field("volume", keep.volume, merge.volume);
+  field("issue", keep.issue, merge.issue);
+  field("pages", keep.pages, merge.pages);
+  field("publisher", keep.publisher, merge.publisher);
+  field("language", keep.language, merge.language);
+  field("abstract", keep.abstract_, merge.abstract_);
+  field("citations", keep.cites ? std::to_string(keep.cites) : string(), merge.cites ? std::to_string(merge.cites) : string());
+  field("source key", keep.key, merge.key);
+  for (const auto& kv : keep.extra) {
+    auto it = merge.extra.find(kv.first);
+    if (it != merge.extra.end()) field("extra." + kv.first, kv.second, it->second);
+  }
+  return conflicts;
+}
+
+Record mergeRecords(const Record& keep, const Record& merge, const std::unordered_map<string, bool>& useMerge, vector<RecordFieldConflict>* conflicts) {
+  Record out = keep;
+  auto choose = [&](const string& name, const string& a, const string& b) {
+    if (a.empty()) return true;
+    if (b.empty() || a == b) return false;
+    if (conflicts) conflicts->push_back({name, a, b});
+    auto it = useMerge.find(name);
+    return it != useMerge.end() && it->second;
+  };
+  auto listText = [](const vector<string>& v) { return join(v, "; "); };
+  if (choose("title", keep.title, merge.title)) out.title = merge.title;
+  if (choose("authors", listText(keep.authors), listText(merge.authors))) { out.authors = merge.authors; out.authorIds = merge.authorIds; }
+  if (choose("author identifiers", listText(keep.authorIds), listText(merge.authorIds))) out.authorIds = merge.authorIds;
+  if (choose("year", keep.year ? std::to_string(keep.year) : string(), merge.year ? std::to_string(merge.year) : string())) out.year = merge.year;
+  if (choose("source", keep.source, merge.source)) out.source = merge.source;
+  if (choose("document type", keep.docType, merge.docType)) out.docType = merge.docType;
+  if (choose("DOI", keep.doi, merge.doi)) out.doi = merge.doi;
+  if (choose("URL", keep.url, merge.url)) out.url = merge.url;
+  if (choose("volume", keep.volume, merge.volume)) out.volume = merge.volume;
+  if (choose("issue", keep.issue, merge.issue)) out.issue = merge.issue;
+  if (choose("pages", keep.pages, merge.pages)) out.pages = merge.pages;
+  if (choose("publisher", keep.publisher, merge.publisher)) out.publisher = merge.publisher;
+  if (choose("language", keep.language, merge.language)) out.language = merge.language;
+  if (choose("abstract", keep.abstract_, merge.abstract_)) out.abstract_ = merge.abstract_;
+  if (choose("citations", keep.cites ? std::to_string(keep.cites) : string(), merge.cites ? std::to_string(merge.cites) : string())) out.cites = merge.cites;
+  if (choose("source key", keep.key, merge.key)) out.key = merge.key;
+  auto mergeList = [](vector<string>& dst, const vector<string>& src) {
+    for (const string& item : src) if (std::find(dst.begin(), dst.end(), item) == dst.end()) dst.push_back(item);
+  };
+  mergeList(out.keywords, merge.keywords);
+  mergeList(out.indexTerms, merge.indexTerms);
+  mergeList(out.affiliations, merge.affiliations);
+  mergeList(out.countries, merge.countries);
+  mergeList(out.refs, merge.refs);
+  for (const auto& kv : merge.extra) {
+    auto it = out.extra.find(kv.first);
+    if (it == out.extra.end() || it->second.empty()) out.extra[kv.first] = kv.second;
+    else if (!kv.second.empty() && it->second != kv.second) {
+      const string name = "extra." + kv.first;
+      if (conflicts) conflicts->push_back({name, it->second, kv.second});
+      auto choice = useMerge.find(name);
+      if (choice != useMerge.end() && choice->second) it->second = kv.second;
+    }
+  }
+  if (out.authorIds.size() != out.authors.size()) out.authorIds.clear();
+  out.src |= merge.src;
+  out.duplicateReviewed = true;
+  if (out.id.empty()) out.id = merge.id;
+  if (!merge.id.empty() && merge.id != out.id) {
+    Json ids = Json::array();
+    auto old = out.extra.find("vosstudio.merged-record-ids");
+    if (old != out.extra.end()) {
+      Json previous = Json::parse(old->second);
+      if (previous.t == Json::Arr) for (const Json& item : previous.a) ids.push(item);
+    }
+    bool exists = false;
+    for (const Json& item : ids.a) if (item.str() == merge.id) exists = true;
+    if (!exists) ids.push(merge.id);
+    out.extra["vosstudio.merged-record-ids"] = ids.dump();
+  }
+  return out;
+}
+
+bool Corpus::provenanceKnown() const {
+  if (files.empty()) return false;
+  for (auto& r : recs) if (!r.src) return false;
+  return true;
+}
+
+Corpus::FileStat Corpus::fileStat(size_t k) const {
+  FileStat f;
+  uint64_t bit = fileBit(k);
+  for (auto& r : recs) {
+    if (!(r.src & bit)) continue;
+    if (r.src & ~bit) f.shared++; else f.unique++;
+  }
+  return f;
 }
 
 // ------------------------------------------------------------ quality
@@ -1057,8 +1400,15 @@ string writeRecords(const vector<Record>& recs, RecordExport fmt) {
       f("T2", r.source);
       if (r.year) f("PY", std::to_string(r.year));
       f("VL", r.volume);
+      f("IS", r.issue);
       f("SP", r.pages);
       f("DO", r.doi);
+      f("UR", r.url);
+      f("ID", r.id);
+      f("AN", r.key);
+      if (!r.extra.empty()) f("X1", "VOSStudioExtra:" + extraJson(r.extra));
+      if (!r.authorIds.empty()) f("X2", "VOSStudioAuthorIds:" + stringListBlob(r.authorIds));
+      if (!r.indexTerms.empty()) f("X3", "VOSStudioIndexTerms:" + stringListBlob(r.indexTerms));
       f("AB", r.abstract_);
       for (auto& k : r.keywords) f("KW", k);
       for (auto& a : affLines(r)) f("AD", a);
@@ -1066,16 +1416,67 @@ string writeRecords(const vector<Record>& recs, RecordExport fmt) {
       f("LA", r.language);
       f("N1", "Times cited: " + std::to_string(r.cites));
       for (auto& c : r.refs) f("CR", c);
-      f("ID", r.key);
       o += "ER  - \n\n";
     }
+  } else if (fmt == RecordExport::BibTeX) {
+    // citation keys: firstauthor + year + first title word, made unique with a/b/c suffixes
+    std::unordered_set<string> used;
+    auto bibEsc = [&](const string& v) {
+      string t = one(v), r2;
+      for (char ch : t) {
+        if (ch == '&' || ch == '%' || ch == '$' || ch == '#' || ch == '_') { r2 += '\\'; r2 += ch; }
+        else r2 += ch;
+      }
+      return r2;
+    };
+    for (auto& r : recs) {
+      string ty = lower(r.docType);
+      const char* entry = contains(ty, "book") ? (contains(ty, "chapter") ? "incollection" : "book") : contains(ty, "proceed") || contains(ty, "conference") ? "inproceedings" : contains(ty, "thesis") ? "phdthesis" : "article";
+      string key;
+      if (!r.authors.empty()) { string a = lower(asciiFold(split(r.authors[0], ',')[0])); for (char ch : a) if (isalnum(uint8_t(ch))) key += ch; }
+      if (key.empty()) key = "anon";
+      if (r.year) key += std::to_string(r.year);
+      for (auto& w : split(lower(asciiFold(r.title)), ' ')) {
+        string t; for (char ch : w) if (isalnum(uint8_t(ch))) t += ch;
+        if (t.size() >= 4 && t != "from" && t != "with" && t != "that" && t != "this" && t != "using" && t != "into" && t != "towards" && t != "toward") { key += t; break; }
+      }
+      string base = key;
+      for (char suf = 'a'; used.count(key) && suf <= 'z'; suf++) key = base + suf;
+      used.insert(key);
+      o += "@" + string(entry) + "{" + key + ",\n";
+      auto f = [&](const char* tag, const string& v) { if (!trim(v).empty()) o += string("  ") + tag + " = {" + bibEsc(v) + "},\n"; };
+      vector<string> au;
+      for (auto& a : r.authors) au.push_back(wosAuthor(a));
+      f("author", join(au, " and "));
+      if (!r.title.empty()) o += "  title = {{" + bibEsc(r.title) + "}},\n";
+      f(string(entry) == "article" ? "journal" : "booktitle", r.source);
+      if (r.year) f("year", std::to_string(r.year));
+      f("volume", r.volume);
+      f("number", r.issue);
+      f("pages", r.pages);
+      f("doi", r.doi);
+      f("url", r.url);
+      f("vosstudioid", r.id);
+      f("vosstudiosourcekey", r.key);
+      if (!r.extra.empty()) f("vosstudioextras", "V1:" + base64(extraJson(r.extra)));
+      if (!r.authorIds.empty()) f("vosstudioauthorids", stringListBlob(r.authorIds));
+      if (!r.indexTerms.empty()) f("keywords-plus", join(r.indexTerms, "; "));
+      if (!r.refs.empty()) f("references", join(r.refs, "; "));
+      f("publisher", r.publisher);
+      f("language", r.language);
+      f("abstract", r.abstract_);
+      if (!r.keywords.empty()) f("keywords", join(r.keywords, "; "));
+      if (r.cites > 0) f("note", "Cited by " + std::to_string(r.cites));
+      if (o.size() >= 2 && o.compare(o.size() - 2, 2, ",\n") == 0) { o.pop_back(); o.pop_back(); o += "\n"; }
+      o += "}\n\n";
+    }
   } else {
-    o = "Authors,Author full names,Title,Year,Source title,Volume,Page start,Cited by,DOI,Affiliations,Abstract,Author Keywords,Index Keywords,References,Document Type,Language of Original Document,Publisher,EID\n";
+    o = "Authors,Author full names,Title,Year,Source title,Volume,Issue,Page start,Cited by,DOI,URL,Affiliations,Abstract,Author Keywords,Index Keywords,References,Document Type,Publisher,Language of Original Document,EID,VOSStudio Record ID,VOSStudio Author IDs,VOSStudio Extra Fields\n";
     for (auto& r : recs) {
       vector<string> au;
       for (auto& a : r.authors) au.push_back(wosAuthor(a));
-      vector<string> cells = {join(au, "; "), join(r.authors, "; "), one(r.title), r.year ? std::to_string(r.year) : "", one(r.source), r.volume, r.pages, std::to_string(r.cites), r.doi,
-                              join(affLines(r), "; "), one(r.abstract_), join(r.keywords, "; "), join(r.indexTerms, "; "), join(r.refs, "; "), r.docType, r.language, r.publisher, r.key};
+      vector<string> cells = {join(au, "; "), join(r.authors, "; "), one(r.title), r.year ? std::to_string(r.year) : "", one(r.source), r.volume, r.issue, r.pages, std::to_string(r.cites), r.doi, r.url,
+                              join(affLines(r), "; "), one(r.abstract_), join(r.keywords, "; "), join(r.indexTerms, "; "), join(r.refs, "; "), r.docType, r.publisher, r.language, r.key, r.id, stringListBlob(r.authorIds), extraJson(r.extra)};
       for (size_t i = 0; i < cells.size(); i++) o += (i ? "," : "") + csvQ(cells[i]);
       o += "\n";
     }

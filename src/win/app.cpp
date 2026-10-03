@@ -1,10 +1,23 @@
 // VOSStudio Native — application shell
+#if !defined(WINVER) || WINVER < 0x0A00
+#undef WINVER
+#define WINVER 0x0A00  // the application requires Windows 10; WM_TOUCH carries native multi-contact input
+#endif
+#if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0A00
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#endif
 #include "app.h"
 
 #include <shellapi.h>
 #include <windowsx.h>
 #include <dwmapi.h>
 
+#include <cstddef>
+#include <cstring>
+#include <type_traits>
+
+#include "../core/oa.h"
 #include "../core/records.h"
 #include "../core/semantic.h"
 #include "../core/world.h"
@@ -15,12 +28,31 @@ namespace win {
 App* gApp = nullptr;
 
 namespace {
-const char* kPageTitles[PG_COUNT] = {"Data", "Build", "Look", "Analyse", "Trends", "Actors", "Publish", "Assistant"};
+const char* kPageTitles[PG_COUNT] = {"Data", "Build", "Look", "Analyse", "Trends", "Actors", "Read", "Write", "Publish", "Assistant"};
 const char* kPageSubs[PG_COUNT] = {"Import, merge and clean bibliographic records", "Choose what to map: type, unit, counting and thresholds",
                                    "Colours, sizes, labels, links and density", "Clusters, items, network statistics and stability",
                                    "Growth, bursts, thematic evolution and comparisons", "Authors, sources, countries, organisations and laws",
+                                   "Read the papers: attach PDFs, highlight and code passages, take notes, keep the reading status",
+                                   "Write the report: pages, figures, tables, citations; export as PDF, Word or HTML",
                                    "Publication figures, exports and project bundles", "AI research assistant for your data and map"};
-const char* kPageIcons[PG_COUNT] = {"data", "network", "look", "analyse", "trends", "actors", "publish", "sparkle"};
+const char* kPageIcons[PG_COUNT] = {"data", "network", "look", "analyse", "trends", "actors", "book", "writer", "publish", "sparkle"};
+enum class RailAction { Page, Map, Papers, Review, Write };
+struct RailItem { const char* id; const char* label; const char* hint; const char* icon; RailAction action; int page; };
+const RailItem kVisualizationNav[] = {
+    {"data", "Data", "Import, merge and clean records", "data", RailAction::Page, PG_DATA},
+    {"build", "Build", "Choose what to map and build a network", "network", RailAction::Page, PG_BUILD},
+    {"map", "Map", "Explore the shared network and its visual views", "map", RailAction::Map, PG_NONE},
+    {"style", "Style", "Colours, sizes, labels, links and density", "look", RailAction::Page, PG_LOOK},
+    {"analyse", "Analyse", "Clusters, items, network statistics and stability", "analyse", RailAction::Page, PG_ANALYSE},
+    {"trends", "Trends", "Growth, bursts, thematic evolution and comparisons", "trends", RailAction::Page, PG_TRENDS},
+    {"actors", "Actors", "Authors, sources, countries and organisations", "actors", RailAction::Page, PG_ACTORS},
+    {"publish", "Figures", "Compose and export publication figures", "publish", RailAction::Page, PG_PUBLISH},
+};
+const RailItem kBibliographyNav[] = {
+    {"papers", "Papers", "Search and manage the project bibliography", "book", RailAction::Papers, PG_NONE},
+    {"review", "Review", "Reading queue, statuses, notes and PDF annotations", "check", RailAction::Review, PG_READ},
+    {"write", "Write", "Write and cite from the shared bibliography", "writer", RailAction::Write, PG_WRITER},
+};
 struct ViewDef { ViewKind v; const char* label; const char* icon; };
 const ViewDef kViews[] = {{ViewKind::Network, "Network", "network"}, {ViewKind::Overlay, "Overlay", "clock"}, {ViewKind::Density, "Density", "density"},
                           {ViewKind::Timeline, "Timeline", "trends"}, {ViewKind::Matrix, "Matrix", "grid"}, {ViewKind::Geo, "Geo", "globe"},
@@ -33,6 +65,14 @@ bool pendingViewCrop = false;
 double lastDt = 0.016;
 
 float easeInOut(float t) { return t < 0.5f ? 4 * t * t * t : 1 - std::pow(-2 * t + 2, 3.f) / 2; }
+
+bool isPromotedTouchMouseMessage(UINT msg) {
+  return (msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) || (msg >= WM_NCMOUSEMOVE && msg <= WM_NCMBUTTONDBLCLK);
+}
+bool isPromotedTouchMouse() {
+  const ULONG_PTR extra = ULONG_PTR(GetMessageExtraInfo());
+  return (extra & ULONG_PTR(0xFFFFFF00u)) == ULONG_PTR(0xFF515700u) && (extra & ULONG_PTR(0x80u)) != 0;
+}
 }  // namespace
 
 double App::lastDtSec() const { return lastDt; }
@@ -64,6 +104,17 @@ bool App::init(HINSTANCE hi, int show, const string& scriptPath, const vector<st
     if (!fn || !fn((HANDLE)-4 /* PER_MONITOR_AWARE_V2 */)) SetProcessDPIAware();
   }
   settings.load();
+  linkScope = settings.j["linkScope"].boolean(true);
+  Workspace initialWorkspace = settings.j["workspace"].integer(WS_VISUALIZATION) == WS_BIBLIOGRAPHY ? WS_BIBLIOGRAPHY : WS_VISUALIZATION;
+  int savedVisualPage = settings.j["workspaceVisualPage"].integer(PG_DATA);
+  if (savedVisualPage < PG_NONE || savedVisualPage > PG_PUBLISH || savedVisualPage == PG_READ || savedVisualPage == PG_WRITER) savedVisualPage = PG_DATA;
+  lastVisualizationPage = savedVisualPage;
+  page = lastVisualizationPage;
+  int savedBiblioRoute = clampv(settings.j["workspaceBibliographyRoute"].integer(BR_PAPERS), int(BR_PAPERS), int(BR_WRITE));
+  lastBibliographyRoute = BibliographyRoute(savedBiblioRoute);
+  railExpanded = settings.j["railExpanded"].boolean(true);
+  workspace = WS_VISUALIZATION;  // setWorkspace(initialWorkspace) applies the saved route after Project exists
+  setAppVersion(kAppVersion);
   crashInstall(this);
   WNDCLASSEXW wc{};
   wc.cbSize = sizeof wc;
@@ -89,6 +140,7 @@ bool App::init(HINSTANCE hi, int show, const string& scriptPath, const vector<st
   hwnd = CreateWindowExW(WS_EX_ACCEPTFILES, wc.lpszClassName, L"VOSStudio", WS_OVERLAPPEDWINDOW, wa.left + (wa.right - wa.left - W) / 2,
                          wa.top + (wa.bottom - wa.top - H) / 2, W, H, nullptr, nullptr, hi, nullptr);
   if (!hwnd) return false;
+  touchRegistered_ = RegisterTouchWindow(hwnd, 0) != FALSE;
   {  // one unified window: the client area covers the caption; DWM keeps the shadow, snapping and (Windows 11) rounded corners
     MARGINS m{1, 1, 1, 1};
     DwmExtendFrameIntoClientArea(hwnd, &m);
@@ -108,10 +160,15 @@ bool App::init(HINSTANCE hi, int show, const string& scriptPath, const vector<st
   leftW = 344 * ui.s;
   rightW = 300 * ui.s;
   bool dark = settings.j.has("dark") ? settings.j["dark"].boolean(true) : true;
+  canvasCacheOn = settings.j["canvasCache"].boolean(true);
+  writerWordSources_ = settings.j["writerWordSources"].boolean(true);
+  splitLoad();
+  ui.textCacheOn = settings.j["textCache"].boolean(true);
   P = std::make_unique<Project>();
   setTheme(dark);
   styleCommitted = styleToJson(P->style);
   buildCommands();
+  if (initialWorkspace != WS_VISUALIZATION) setWorkspace(initialWorkspace);
   if (!scriptPath.empty()) {
     bool ok = false;
     string t = readFileU(scriptPath, &ok);
@@ -141,6 +198,7 @@ int App::run() {
       DispatchMessageW(&msg);
     }
     if (job) job->notify = hwnd;
+    const double rdDue = readerIdleTick();  // a closed reader frees its document after a while
     bool iconic = IsIconic(hwnd) != 0;
     if ((iconic || occluded) && !scriptMode) {
       pumpWork();
@@ -148,14 +206,31 @@ int App::run() {
       MsgWaitForMultipleObjects(0, nullptr, FALSE, occluded ? 250 : (busy() ? 500 : INFINITE), QS_ALLINPUT);
       continue;
     }
-    bool smooth = ui.animating || animT0 >= 0 || camTargetZoom > 0 || scriptMode || !uiQueue.empty() || !ui.toasts.empty() || (job && job->finished);
+    bool smooth = ui.animating || animT0 >= 0 || camTargetZoom > 0 || scriptMode || !uiQueue.empty() || !ui.toasts.empty() || (job && job->finished) ||
+                  themeAnim.active || themeAnim.pending;
     if (needFrame || smooth) {
       needFrame = false;
+      liveOverlayFrame_ = false;
       frame();
+    } else if (live.open && (live.dirty || live.animFps > 0)) {
+      // only the Live assistant's overlay moves: redraw it alone, at its own modest rate, over the cached window
+      double period = 1.0 / (live.dirty ? std::max(30, live.animFps) : std::max(1, live.animFps));
+      double due = liveFrameT_ + period - nowSeconds();
+      if (due > 0.0015) {
+        MsgWaitForMultipleObjects(0, nullptr, FALSE, DWORD(std::ceil(due * 1000)), QS_ALLINPUT);
+      } else {
+        liveOverlayFrame_ = liveCached_;
+        frame();
+      }
     } else if (busy()) {
       if (MsgWaitForMultipleObjects(0, nullptr, FALSE, 100, QS_ALLINPUT) == WAIT_TIMEOUT) needFrame = true;
     } else {
-      DWORD wait = ui.wantsCaret ? 530 : INFINITE;
+      DWORD wait = ui.wantsCaret ? 530 : (perfHud ? 500 : INFINITE);
+      if (rdDue >= 0) wait = std::min(wait, DWORD(rdDue * 1000) + 50);
+      if (ui.wakeAt > 0) {
+        double ms = std::max(0.0, (ui.wakeAt - nowSeconds()) * 1000.0);
+        wait = std::min(wait, DWORD(std::ceil(std::min<double>(ms, double(INFINITE - 1)))));
+      }
       if (MsgWaitForMultipleObjects(0, nullptr, FALSE, wait, QS_ALLINPUT) == WAIT_TIMEOUT) needFrame = true;
     }
   }
@@ -197,7 +272,106 @@ void App::pumpWork() {
   }
 }
 
+void App::touchPoint(DWORD id, POINT p, bool isDown, bool isUp) {
+  const double now = nowSeconds();
+  input.touch = true;
+  lastInputT = now;
+  bool pinchStarted = false;
+
+  if (isDown) {
+    const bool first = touchPoints_.empty();
+    touchPoints_[id] = p;
+    if (first) {
+      touchPinching_ = false;
+      touchPinchDistance_ = 0;
+      touchTapCandidate_ = true;
+      touchTapMoved_ = false;
+      touchTapStart_ = p;
+      const float doubleTapRadius = 14 * ui.s;
+      if (touchLastTapT_ > 0 && now - touchLastTapT_ <= 0.48 &&
+          std::hypot(float(p.x - touchLastTap_.x), float(p.y - touchLastTap_.y)) <= doubleTapRadius) input.dbl = true;
+      input.mx = float(p.x);
+      input.my = float(p.y);
+      input.down[0] = true;
+      input.pressed[0] = true;
+      input.released[0] = false;
+    } else if (!touchPinching_ && touchPoints_.size() >= 2) {
+      // A second contact cancels a pending click or one-finger drag; the pair becomes a pinch gesture.
+      touchPinching_ = true;
+      touchPinchDistance_ = 0;
+      touchTapCandidate_ = false;
+      touchTapMoved_ = true;
+      input.down[0] = false;
+      input.pressed[0] = false;
+      input.released[0] = false;
+      input.touchCancel = true;
+      pinchStarted = true;
+    }
+  } else {
+    auto it = touchPoints_.find(id);
+    if (it == touchPoints_.end()) return;
+    it->second = p;
+  }
+
+  auto syncPinch = [&]() {
+    if (touchPoints_.size() < 2) return;
+    auto a = touchPoints_.begin();
+    auto b = std::next(a);
+    const float dx = float(a->second.x - b->second.x), dy = float(a->second.y - b->second.y);
+    const float distance = std::hypot(dx, dy);
+    input.mx = (float(a->second.x) + float(b->second.x)) * 0.5f;
+    input.my = (float(a->second.y) + float(b->second.y)) * 0.5f;
+    if (!pinchStarted && touchPinchDistance_ > 1.f && distance > 1.f) {
+      const float delta = std::log(distance / touchPinchDistance_) / std::log(1.2f);
+      if (std::isfinite(delta)) input.pinch += delta;
+    }
+    touchPinchDistance_ = distance;
+  };
+
+  if (touchPinching_) syncPinch();
+  else if (!isDown && touchPoints_.size() == 1) {
+    const POINT q = touchPoints_.begin()->second;
+    input.mx = float(q.x);
+    input.my = float(q.y);
+    input.down[0] = true;
+    const float moveThreshold = 8 * ui.s;
+    if (touchTapCandidate_ && std::hypot(float(q.x - touchTapStart_.x), float(q.y - touchTapStart_.y)) >= moveThreshold) touchTapMoved_ = true;
+  }
+
+  if (isUp) {
+    auto it = touchPoints_.find(id);
+    if (it != touchPoints_.end()) {
+      if (!touchPinching_ && touchPoints_.size() == 1) {
+        input.mx = float(p.x);
+        input.my = float(p.y);
+        input.down[0] = false;
+        input.released[0] = true;
+        if (touchTapCandidate_ && !touchTapMoved_) {
+          touchLastTap_ = p;
+          touchLastTapT_ = now;
+        }
+        touchTapCandidate_ = false;
+      } else {
+        // Finish the pinch at the last two-contact midpoint. A remaining finger never turns into a new click.
+        if (touchPinching_ && touchPoints_.size() >= 2) syncPinch();
+        input.down[0] = false;
+        input.released[0] = false;
+        touchPinchDistance_ = 0;
+      }
+      touchPoints_.erase(it);
+      if (touchPoints_.empty()) {
+        touchPinching_ = false;
+        touchPinchDistance_ = 0;
+        touchTapCandidate_ = false;
+      }
+    }
+  }
+  needFrame = true;
+}
+
 LRESULT App::wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+  // WM_TOUCH is handled below; ignore its compatibility mouse stream to avoid double activation.
+  if (touchRegistered_ && isPromotedTouchMouseMessage(msg) && isPromotedTouchMouse()) return 0;
   switch (msg) {
     case WM_SIZE:
       if (wp == SIZE_MINIMIZED) {
@@ -208,6 +382,16 @@ LRESULT App::wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     case WM_ACTIVATEAPP:
       if (wp) { occluded = false; needFrame = true; }
+      else if (!touchPoints_.empty()) {
+        touchPoints_.clear();
+        touchPinching_ = false;
+        touchPinchDistance_ = 0;
+        touchTapCandidate_ = false;
+        input.down[0] = false;
+        input.released[0] = true;
+        input.touchCancel = true;
+        needFrame = true;
+      }
       return 0;
     case WM_NCCALCSIZE:
       if (wp) {
@@ -250,9 +434,14 @@ LRESULT App::wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_NCMOUSEMOVE: {
       POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
       ScreenToClient(h, &pt);
-      input.mx = float(pt.x);
-      input.my = float(pt.y);
-      needFrame = true;
+      const float x = float(pt.x), y = float(pt.y);
+      const bool moved = x != input.mx || y != input.my;
+      input.mx = x;
+      input.my = y;
+      if (moved) {
+        lastInputT = nowSeconds();
+        if (pointerMoveNeedsFrame(x, y)) needFrame = true;
+      }
       TRACKMOUSEEVENT tme{sizeof tme, TME_LEAVE | TME_NONCLIENT, h, 0};
       TrackMouseEvent(&tme);
       break;
@@ -289,15 +478,19 @@ LRESULT App::wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
       needFrame = true;
       return 0;
     }
-    case WM_MOUSEMOVE:
-      input.mx = float(GET_X_LPARAM(lp));
-      input.my = float(GET_Y_LPARAM(lp));
-      needFrame = true;
-      {
-        TRACKMOUSEEVENT tme{sizeof tme, TME_LEAVE, h, 0};
-        TrackMouseEvent(&tme);
+    case WM_MOUSEMOVE: {
+      const float x = float(GET_X_LPARAM(lp)), y = float(GET_Y_LPARAM(lp));
+      const bool moved = x != input.mx || y != input.my;
+      input.mx = x;
+      input.my = y;
+      if (moved) {
+        lastInputT = nowSeconds();
+        if (pointerMoveNeedsFrame(x, y)) needFrame = true;
       }
+      TRACKMOUSEEVENT tme{sizeof tme, TME_LEAVE, h, 0};
+      TrackMouseEvent(&tme);
       return 0;
+    }
     case WM_MOUSELEAVE:
       input.mx = input.my = -1;
       needFrame = true;
@@ -323,6 +516,11 @@ LRESULT App::wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_MOUSEWHEEL: {
       input.wheel += float(GET_WHEEL_DELTA_WPARAM(wp)) / 120.f;
+      needFrame = true;
+      return 0;
+    }
+    case WM_MOUSEHWHEEL: {
+      input.hwheel += float(GET_WHEEL_DELTA_WPARAM(wp)) / 120.f;
       needFrame = true;
       return 0;
     }
@@ -355,6 +553,23 @@ LRESULT App::wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return TRUE;
       }
       break;
+    case WM_TOUCH: {
+      const UINT count = LOWORD(wp);
+      TOUCHINPUT points[256]{};  // Win32 touch frames are bounded well below this fixed stack buffer.
+      if (count > 256 || !GetTouchInputInfo(reinterpret_cast<HTOUCHINPUT>(lp), count, points, sizeof(TOUCHINPUT)))
+        return DefWindowProcW(h, msg, wp, lp);
+      for (UINT i = 0; i < count; ++i) {
+        const TOUCHINPUT& ti = points[i];
+        POINT pt{LONG(ti.x / 100), LONG(ti.y / 100)};  // TOUCHINPUT coordinates are in hundredths of a physical pixel
+        ScreenToClient(h, &pt);
+        const bool down = (ti.dwFlags & TOUCHEVENTF_DOWN) != 0;
+        const bool up = (ti.dwFlags & TOUCHEVENTF_UP) != 0;
+        const bool moved = (ti.dwFlags & TOUCHEVENTF_MOVE) != 0;
+        if (down || up || moved) touchPoint(ti.dwID, pt, down, up);
+      }
+      CloseTouchInputHandle(reinterpret_cast<HTOUCHINPUT>(lp));
+      return 0;
+    }
     case WM_DROPFILES: {
       HDROP d = reinterpret_cast<HDROP>(wp);
       UINT n = DragQueryFileW(d, 0xFFFFFFFF, nullptr, 0);
@@ -379,17 +594,27 @@ LRESULT App::wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     }
     case WM_CLOSE:
-      if (P && P->dirty && hasMap() && !scriptMode) {
+      if (live.open && P && (hasCorpus() || hasMap()) && !scriptMode) liveSaveToChat();
+      if (P && P->dirty && (hasCorpus() || hasMap() || P->library.hasData() || !wdoc.empty()) && !scriptMode) {
         int r = MessageBoxW(h, L"Save changes to this project before closing?", L"VOSStudio", MB_YESNOCANCEL | MB_ICONQUESTION);
         if (r == IDCANCEL) return 0;
         if (r == IDYES) { cmdSaveProject(false); if (P->dirty) return 0; }
       }
       if (job) { job->cancel = true; job->join(); }
+      liveDisconnect(false);
+      readerStorePosition();
+      writerPreviewShutdown();
+      readerShutdown();
       settings.j.set("dark", ui.dark);
+      settings.j.set("workspace", int(workspace));
+      settings.j.set("workspaceVisualPage", lastVisualizationPage);
+      settings.j.set("workspaceBibliographyRoute", int(lastBibliographyRoute));
+      settings.j.set("railExpanded", railExpanded);
       settings.save();
       DestroyWindow(h);
       return 0;
     case WM_DESTROY:
+      if (touchRegistered_) { UnregisterTouchWindow(h); touchRegistered_ = false; }
       PostQuitMessage(0);
       return 0;
   }
@@ -400,12 +625,151 @@ LRESULT App::wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 // frame
 // =====================================================================================
 void App::setTheme(bool dark) {
+  settings.j.set("dark", dark);
+  auto& a = themeAnim;
+  auto startIcon = [&](bool wasDark) {  // the button's icon turns from the one theme's to the other's
+    a.iconFrom = wasDark ? "sun" : "moon";
+    a.iconTo = dark ? "sun" : "moon";
+    a.iconT0 = nowSeconds();
+  };
+  if (a.pending) { if (dark != a.pendingDark) { startIcon(a.pendingDark); a.pendingDark = dark; } return; }
+  if (a.active) {
+    if (dark == a.toDark) return;
+    // switched again mid-way: the circle turns round from where it is (the kept picture is the right one, since the
+    // way back leads to the theme it shows); the speed stays the same, so the leg takes its share of the full time
+    startIcon(a.toDark);
+    a.toDark = dark;
+    a.r0 = a.r;
+    a.r1 = dark ? a.rmax : 0;
+    a.t0 = nowSeconds();
+    a.dur = themeRevealSeconds() * clampv(std::fabs(a.r1 - a.r0) / std::max(1.f, a.rmax), 0.15f, 1.f);
+    needFrame = true;
+    return;
+  }
+  if (dark == ui.dark) return;
+  if (!themeRevealAllowed()) { applyTheme(dark); applyFrameTheme(); return; }
+  startIcon(ui.dark);
+  a.pending = true;
+  a.pendingDark = dark;
+  needFrame = true;  // this frame ends in the old theme and is kept; the reveal starts with the next one (drawThemeReveal)
+}
+
+void App::applyTheme(bool dark) {
   ui.setTheme(dark);
   P->style.darkTheme = dark;
   styleDirty = true;
   figSig.clear();
   settings.j.set("dark", dark);
-  applyFrameTheme();
+}
+
+double App::themeRevealSeconds() const { return clampv(settings.j["themeRevealMs"].num(750) / 1000.0, 0.1, 3.0); }
+
+bool App::themeRevealAllowed() const {
+  if (scriptMode || frameNo == 0 || !g.backTex || g.W <= 0 || g.H <= 0) return false;
+  if (!settings.j["themeReveal"].boolean(true)) return false;
+  BOOL anim = TRUE;
+  SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &anim, 0);  // Windows: Accessibility -> Visual effects -> Animation effects
+  return anim != FALSE;
+}
+
+// The sun / moon button: background as any icon button, the icon of the theme one would switch to; while a switch is
+// under way the old icon turns and shrinks away as the new one turns in.
+void App::drawThemeButton(const Rect& r, bool hovered, bool held, const UiColors& col) {
+  float s = ui.s;
+  if (hovered) ui.fill(r, col.hover, 6 * s);
+  if (held) ui.fill(r, col.active, 6 * s);
+  Color fg = hovered ? col.text : col.textDim;
+  float cx = r.x + r.w / 2, cy = r.y + r.h / 2, size = std::min(17 * s, r.h * 0.58f);
+  auto& a = themeAnim;
+  bool targetDark = themeTarget();
+  string to = targetDark ? "sun" : "moon";
+  const double morphS = 0.45;
+  float p = a.iconT0 < 0 ? 1.f : float(clampv((ui.time - a.iconT0) / morphS, 0.0, 1.0));
+  if (p >= 1 || a.iconFrom.empty() || a.iconFrom == a.iconTo) { ui.icon(to, cx, cy, size, fg, 1.6f); return; }
+  float e = easeInOut(p);
+  auto turn = [&](const string& name, float deg, float sc, float alpha) {
+    if (sc < 0.03f || alpha < 0.03f) return;
+    D2D1_MATRIX_3X2_F old;
+    ui.dc()->GetTransform(&old);
+    D2D1_POINT_2F c = D2D1::Point2F(cx, cy);
+    ui.dc()->SetTransform(D2D1::Matrix3x2F::Scale(sc, sc, c) * D2D1::Matrix3x2F::Rotation(deg, c) * old);
+    ui.icon(name, cx, cy, size, fg.withA(fg.a * alpha), 1.6f);
+    ui.dc()->SetTransform(old);
+  };
+  turn(a.iconFrom, 90 * e, 1 - e, 1 - e);
+  turn(a.iconTo, -90 * (1 - e), e, e);
+  ui.animating = true;
+}
+
+void App::drawThemeReveal(double t) {
+  auto& a = themeAnim;
+  if (a.pending) {  // this frame is complete in the old theme: keep it, switch the colours, and start
+    a.pending = false;
+    bool toDark = a.pendingDark;
+    bool kept = g.copyCapture(themeCopy_) && themeCopy_.w == g.W && themeCopy_.h == g.H;
+    a.oldDark = ui.dark;
+    applyTheme(toDark);
+    if (!kept) { applyFrameTheme(); needFrame = true; return; }
+    float s = ui.s;
+    if (a.btn.w > 0) { a.ox = a.btn.x + a.btn.w / 2; a.oy = a.btn.y + a.btn.h / 2; }
+    else { a.ox = float(g.W) - 6 * s - captionW() - 34 * s * 2.5f; a.oy = 26 * s; }  // where the button sits when the top bar is not shown
+    float W = float(g.W), H = float(g.H);
+    a.rmax = std::hypot(std::max(a.ox, W - a.ox), std::max(a.oy, H - a.oy)) + 2;
+    a.toDark = toDark;
+    a.r0 = toDark ? 0 : a.rmax;  // dark grows outward from the button; light closes in from the edges onto it
+    a.r1 = toDark ? a.rmax : 0;
+    a.r = a.r0;
+    a.t0 = t;
+    a.dur = themeRevealSeconds();
+    a.active = true;
+    needFrame = true;
+    return;  // the frame on screen is the old theme; the first step follows at once
+  }
+  if (!a.active) return;
+  auto finish = [&]() {
+    if (a.toDark != ui.dark) applyTheme(a.toDark);  // a run that turned round ends in the theme of the kept picture
+    applyFrameTheme();
+    a.active = false;
+    g.copyDrop(themeCopy_);
+    needFrame = true;
+  };
+  if (!themeCopy_.valid || themeCopy_.w != g.W || themeCopy_.h != g.H) { finish(); return; }  // resized meanwhile: nothing to show
+  float k = float(clampv((t - a.t0) / std::max(0.05, a.dur), 0.0, 1.0));
+  a.r = a.r0 + (a.r1 - a.r0) * easeInOut(k);
+  float r = std::max(0.f, a.r);
+  auto* dc = g.dc.get();
+  dc->SetTransform(D2D1::Matrix3x2F::Identity());
+  // The circle is the dark region. The kept picture goes inside it when the picture is the dark one (light closing in
+  // on a dark window, or its reversal) and outside it otherwise (dark spreading over a light window).
+  Com<ID2D1EllipseGeometry> ell;
+  Com<ID2D1PathGeometry> outside;
+  ID2D1Geometry* mask = nullptr;
+  if (SUCCEEDED(g.d2f->CreateEllipseGeometry(D2D1::Ellipse(D2D1::Point2F(a.ox, a.oy), r, r), ell.put()))) {
+    if (a.oldDark) mask = ell.get();
+    else {
+      Com<ID2D1RectangleGeometry> rg;
+      Com<ID2D1GeometrySink> sink;
+      if (SUCCEEDED(g.d2f->CreateRectangleGeometry(D2D1::RectF(0, 0, float(g.W), float(g.H)), rg.put())) && SUCCEEDED(g.d2f->CreatePathGeometry(outside.put())) &&
+          SUCCEEDED(outside->Open(sink.put()))) {
+        rg->CombineWithGeometry(ell.get(), D2D1_COMBINE_MODE_EXCLUDE, nullptr, 0.25f, sink.get());
+        sink->Close();
+        mask = outside.get();
+      }
+    }
+  }
+  if (!mask) { finish(); return; }
+  D2D1_LAYER_PARAMETERS1 lp = D2D1::LayerParameters1(D2D1::InfiniteRect(), mask, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1::IdentityMatrix(), 1.f, nullptr, D2D1_LAYER_OPTIONS1_NONE);
+  dc->PushLayer(&lp, nullptr);
+  g.copyRestore(themeCopy_);
+  if (a.btn.w > 0) {  // the button in the old theme, its icon turning as well (it lies under the picture until the circle passes it)
+    UiColors oc = Ui::palette(a.oldDark);
+    ui.fill(a.btn, oc.rail);
+    drawThemeButton(a.btn, a.btnHover, false, oc);
+  }
+  dc->PopLayer();
+  dc->SetTransform(D2D1::Matrix3x2F::Identity());
+  if (k >= 1) finish();
+  else needFrame = true;
 }
 
 void App::applyFrameTheme() {
@@ -419,12 +783,16 @@ void App::layout() {
   float W = float(g.W), H = float(g.H);
   topR = {0, 0, W, 52 * s};
   statusR = {0, H - 24 * s, W, 24 * s};
-  railR = {0, topR.b(), 64 * s, statusR.y - topR.b()};
+  // Expanded labels are useful on wide desktop windows; at tighter widths the rail returns to the compact icon strip.
+  float navW = railExpanded && W >= 1400 * s ? 192 * s : 64 * s;
+  railR = {0, topR.b(), navW, statusR.y - topR.b()};
   float lw = std::round(leftW * leftEase());
   leftR = {railR.r(), topR.b(), lw, railR.h};
   float rw = std::round(rightW * rightEase());
   rightR = {W - rw, topR.b(), rw, railR.h};
   canvasR = {leftR.r(), topR.b(), rightR.x - leftR.r(), railR.h};
+  mainR = canvasR;
+  if (splitActive()) { int mp = splitMapPane(); canvasR = mp >= 0 ? splitRect(mp) : mainR; }  // the map lives in its pane
 }
 
 bool App::startJob(const string& label, std::function<void(Job&)> fn, std::function<void()> done) {
@@ -438,53 +806,218 @@ bool App::startJob(const string& label, std::function<void(Job&)> fn, std::funct
   return true;
 }
 
+// Cheap canvas-cache guard. Map-sized inputs are protected by explicit NetView dirty bits and storage generations;
+// this hash covers only scalar/style state so a cache hit never walks every label, position, attribute or flag.
+namespace {
+struct SigHash {
+  uint64_t h = 0x243F6A8885A308D3ull;
+  void word(uint64_t w) { h = (h ^ w) * 0x9E3779B97F4A7C15ull; h ^= h >> 29; }
+  void add(const void* p, size_t n) {
+    const uint8_t* b = static_cast<const uint8_t*>(p);
+    while (n >= 8) { uint64_t w; memcpy(&w, b, 8); word(w); b += 8; n -= 8; }
+    if (n) { uint64_t w = 0; memcpy(&w, b, n); word(w | (uint64_t(n) << 56)); }
+  }
+  template <class T> void v(const T& x) { static_assert(std::is_trivially_copyable<T>::value, "pod"); add(&x, sizeof x); }
+  void str(const string& x) { word(x.size()); add(x.data(), x.size()); }
+  void col(const Color& c) { v(c.r); v(c.g); v(c.b); v(c.a); }
+};
+}  // namespace
+
+void App::setCanvasCache(bool on) {
+  canvasCacheOn = on;
+  settings.j.set("canvasCache", on);
+  settings.save();
+  if (!on) g.copyDrop(g.canvasCopy);
+  needFrame = true;
+}
+
+void App::setTextCache(bool on) {
+  ui.textCacheOn = on;
+  settings.j.set("textCache", on);
+  settings.save();
+  if (!on) ui.textCacheClear();
+  needFrame = true;
+}
+
+namespace {
+double processWorkingSetMB() {
+  struct Pmc { DWORD cb, pageFaults; SIZE_T peakWs, ws, qppp, qpp, qpnpp, qnpp, pf, ppf; };  // PROCESS_MEMORY_COUNTERS
+  using Fn = BOOL(WINAPI*)(HANDLE, Pmc*, DWORD);
+  static Fn fn = reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "K32GetProcessMemoryInfo")));
+  if (!fn) return 0;
+  Pmc m{};
+  m.cb = sizeof m;
+  if (!fn(GetCurrentProcess(), &m, sizeof m)) return 0;
+  return double(m.ws) / (1024.0 * 1024.0);
+}
+}  // namespace
+
+// bookkeeping for the performance overlay: one call per presented frame
+void App::perfFrameDone(double t0, bool overlayOnly, bool canvasFromCopy) {
+  if (!perfHud) return;
+  double now = nowSeconds();
+  double ms = (now - t0) * 1000;
+  perf_.frames++;
+  perf_.ms += ms;
+  perf_.msMax = std::max(perf_.msMax, ms);
+  if (overlayOnly) perf_.overlay++;
+  else if (canvasFromCopy) perf_.canvasHit++;
+  else perf_.canvasMiss++;
+  perf_.textHit += ui.textHits;
+  perf_.textMiss += ui.textMisses;
+  if (perfT0_ <= 0) perfT0_ = now;
+  if (now - perfT0_ < 0.5) return;
+  perfShown_ = perf_;
+  perfShown_.sec = now - perfT0_;
+  perfShown_.ms = perf_.frames ? perf_.ms / perf_.frames : 0;
+  perf_ = PerfWindow{};
+  perfT0_ = now;
+  FILETIME c, e, k, u;
+  if (GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u)) {
+    uint64_t ticks = ((uint64_t(k.dwHighDateTime) << 32) | k.dwLowDateTime) + ((uint64_t(u.dwHighDateTime) << 32) | u.dwLowDateTime);
+    if (perfCpuT_ > 0) perfCpu_ = double(ticks - perfCpuTicks_) / 1e7 / std::max(1e-3, now - perfCpuT_) * 100.0;
+    perfCpuTicks_ = ticks;
+    perfCpuT_ = now;
+  }
+  perfMemMB_ = processWorkingSetMB();
+}
+
+void App::drawPerfHud() {
+  float s = ui.s;
+  const PerfWindow& w = perfShown_;
+  double sec = w.sec > 0 ? w.sec : 1;
+  vector<string> lines;
+  lines.push_back(string("Performance  ·  VOSStudio ") + kAppVersion + "  ·  " + g.adapter);
+  lines.push_back("frames/s " + fmtNum(w.frames / sec, 1) + "   frame " + fmtNum(w.ms, 2) + " ms avg, " + fmtNum(w.msMax, 1) + " ms max");
+  lines.push_back("map layer: rendered " + std::to_string(w.canvasMiss) + " · from cache " + std::to_string(w.canvasHit) + " · overlay-only " + std::to_string(w.overlay) +
+                  (canvasCacheOn ? "   (canvas cache on)" : "   (canvas cache OFF)"));
+  int tt = w.textHit + w.textMiss;
+  lines.push_back("text layouts: " + (tt ? fmtNum(100.0 * w.textHit / tt, 0) : string("-")) + " % reused · " + fmtInt(int(ui.textCacheSize())) + " cached" +
+                  (ui.textCacheOn ? "   (text cache on)" : "   (text cache OFF)"));
+  lines.push_back("items " + fmtInt(P->net.n()) + " · links " + fmtInt(P->net.m()) + " · labels " + fmtInt(nv.labelsShown) + " · charts " + fmtInt(static_cast<long long>(chartCache.size())));
+  lines.push_back("CPU " + fmtNum(perfCpu_, 1) + " % of one core · memory " + fmtNum(perfMemMB_, 0) + " MB · " + (busy() ? "job running" : "idle"));
+  float fs = 11.5f * s, lh = 16 * s, pad = 10 * s;
+  float bw = 0;
+  for (auto& l : lines) bw = std::max(bw, ui.textW(l, fs, 400, true));
+  Rect area = canvasR.w > 100 * s ? canvasR : Rect{0, topR.b(), float(g.W), float(g.H) - topR.b()};
+  Rect r{area.r() - bw - 2 * pad - 12 * s, area.b() - lines.size() * lh - 2 * pad - 12 * s, bw + 2 * pad, lines.size() * lh + 2 * pad};
+  ui.shadow(r, 8 * s);
+  ui.fill(r, ui.dark ? Color{0.08f, 0.09f, 0.11f, 0.92f} : Color{1, 1, 1, 0.94f}, 8 * s);
+  ui.stroke(r, ui.c.border, 8 * s);
+  for (size_t i = 0; i < lines.size(); i++)
+    ui.text({r.x + pad, r.y + pad + i * lh, bw, lh}, lines[i], fs, i == 0 ? ui.c.text : ui.c.textDim, AL_LEFT, i == 0 ? 600 : 400, true);
+}
+
+uint64_t App::canvasSignature(const Theme& th) const {
+  SigHash h;
+  const Network& N = P->net;
+  const ViewStyle& S = P->style;
+  h.v(reinterpret_cast<uintptr_t>(P.get())); h.v(reinterpret_cast<uintptr_t>(&N)); h.v(reinterpret_cast<uintptr_t>(&S));
+  h.v(P->corpusVersion);
+  // view, camera, viewport, theme
+  h.v(int(view)); h.v(int(nv.kind)); h.v(int(nv.geoTint)); h.v(nv.hideMarks); h.v(nv.hoverLink); h.v(showLabels); h.v(ui.dark);
+  h.v(nv.cam.x); h.v(nv.cam.y); h.v(nv.cam.zoom); h.v(nv.cam.yaw); h.v(nv.cam.pitch); h.v(nv.cam.dist3); h.v(nv.fitZoom());
+  h.v(nv.vp.x); h.v(nv.vp.y); h.v(nv.vp.w); h.v(nv.vp.h); h.v(nv.uiScale); h.v(g.W); h.v(g.H);
+  h.col(th.bg); h.col(th.fg); h.col(th.muted); h.col(th.halo); h.col(th.grid); h.col(th.panel); h.v(th.light);
+  // style (fixed-size fields plus the user override table's identity/size; actual changes set nodesDirty via setData)
+  h.str(S.look); h.str(S.palette); h.v(S.clusterOverride.size());
+  h.v(S.sizing); h.v(S.sizeVar); h.v(S.linkVar); h.v(S.flat); h.v(S.nodeOpacity); h.v(S.border); h.v(int(S.borderCol)); h.col(S.borderCustom);
+  h.v(S.baseSize); h.v(S.maxSize); h.v(S.scale); h.v(S.labelVar); h.v(int(S.colorBy)); h.col(S.single); h.str(S.scheme); h.v(S.scoreMin); h.v(S.scoreMax);
+  h.v(int(S.labelPlace)); h.v(S.labelWeight); h.v(S.labelSize); h.v(S.maxLen); h.v(S.maxLabels); h.v(S.truncate); h.v(S.labelHalo); h.v(S.labelByCluster);
+  h.v(S.linksVisible); h.v(int(S.linkColor)); h.col(S.linkSingle); h.v(S.linkOpacity); h.v(S.curvature); h.v(S.linkWidth); h.v(S.linkMaxW); h.v(int(S.linkGeom));
+  h.v(S.maxLines); h.v(S.minStrength); h.v(S.kernel); h.v(S.densityAlpha); h.str(S.densityScheme); h.v(S.densityFull); h.v(S.kernelAuto); h.v(S.densityByCluster);
+  h.v(int(S.backdrop)); h.v(S.darkTheme); h.v(S.hulls); h.v(S.clusterNames); h.v(S.bundle); h.v(S.cvd); h.v(S.zScale);
+  // Network, positions and flags are invalidated explicitly through NetView's dirty bits. Hash only their stable
+  // storage identity and shape here; traversing labels/attributes/positions on every cached frame erased the gain.
+  h.v(N.n()); h.v(N.links.size()); h.v(N.nClusters); h.v(N.weightIdx); h.v(N.scoreIdx); h.v(N.scoreNames.size());
+  h.v(reinterpret_cast<uintptr_t>(N.nodes.data())); h.v(reinterpret_cast<uintptr_t>(N.links.data()));
+  h.v(reinterpret_cast<uintptr_t>(N.clusterNames.data())); h.v(N.clusterNames.size());
+  h.v(reinterpret_cast<uintptr_t>(nv.pos.data())); h.v(nv.pos.size());
+  h.v(reinterpret_cast<uintptr_t>(nv.flags.data())); h.v(nv.flags.size());
+  h.v(P->bundles.P); h.v(reinterpret_cast<uintptr_t>(P->bundles.pts.data())); h.v(P->bundles.pts.size());
+  h.v(hover); h.v(clusterFilter); h.v(selection.size()); h.v(searchHits.size());
+  h.v(liveSignature());  // the linked views of the split panes
+  // the geo background layer
+  if (view == ViewKind::Geo) {
+    h.v(geoMode()); h.v(geoFill); h.v(geoBasemap); h.v(geoArcs); h.v(geoLayerKind); h.v(geoDenStyle); h.v(geoDenMeasure); h.v(geoHover); h.v(geoSel);
+    h.v(geoModeA); h.v(geoStats.size()); h.v(geoNodeCountry.size()); h.v(geoPairs.size()); h.str(geoDenBmpSig); h.v(geoDocsTotal); h.v(geoDocsMax);
+    h.v(geoYearLo); h.v(geoYearHi); h.v(geoWorld.size()); h.v(geoGeom.size()); h.v(geoDenW); h.v(geoDenH);
+  }
+  return h.h ? h.h : 1;
+}
+
 void App::frame() {
   double t = nowSeconds();
   lastDt = clampv(t - lastFrameT, 0.001, 0.1);
   if (lastFrameT > 0) fps = fps * 0.9 + 0.1 / lastDt;
   lastFrameT = t;
   frameNo++;
-  pageCharts.swap(frameCharts);  // charts drawn in the previous frame
-  frameCharts.clear();
+  bool overlay = liveOverlayFrame_ && liveCached_ && live.open && !showStart && !figZoomOpen && !scriptMode && !paletteOpen && !crashDialog && !ui.anyModal() && !ui.anyPopup() && !job;
+  liveOverlayFrame_ = false;
   pumpWork();
+  if (P && !overlay) scopeActive();  // keep the linked-selection scope current for the geo view and the caches
   // input snapshot
   Input in = input;
   in.ctrl = GetKeyState(VK_CONTROL) < 0;
+  if (!in.keys.empty() || !in.chars.empty() || in.wheel != 0 || in.hwheel != 0 || in.pinch != 0 || in.touch || in.pressed[0] || in.pressed[1] || in.pressed[2] || in.down[0] || in.down[1] || in.down[2] || in.mx != inputMx || in.my != inputMy) lastInputT = t;
+  inputMx = in.mx;
+  inputMy = in.my;
   in.shift = GetKeyState(VK_SHIFT) < 0;
   in.alt = GetKeyState(VK_MENU) < 0;
   for (int b = 0; b < 3; b++) { input.pressed[b] = input.released[b] = false; }
   input.dbl = false;
   input.wheel = 0;
+  input.hwheel = 0;
+  input.pinch = 0;
+  input.touch = false;
+  input.touchCancel = false;
   input.chars.clear();
   input.keys.clear();
 
-  ui.beginFrame(in, t);
+  ui.beginFrame(in, t, overlay);
   {
     bool ev = in.pressed[0] || in.pressed[1] || in.pressed[2] || in.released[0] || in.released[1] || in.released[2] || in.down[0] || in.down[1] ||
-              in.wheel != 0 || !in.chars.empty() || !in.keys.empty() || busy() || scriptMode || animT0 >= 0;
+              in.wheel != 0 || in.hwheel != 0 || in.pinch != 0 || in.touch || !in.chars.empty() || !in.keys.empty() || busy() || scriptMode || animT0 >= 0;
     if (ev) chartFresh = 3;
     else if (chartFresh > 0) chartFresh--;
     if (frameNo % 600 == 0) {  // drop scenes of charts that are no longer shown
       for (auto it = chartCache.begin(); it != chartCache.end();) it = frameNo - it->second.frame > 600 ? chartCache.erase(it) : std::next(it);
     }
   }
+  themeAnim.btn = {0, 0, 0, 0};  // set by drawTopBar when the top bar is shown
   if (scriptMode) stepScript();
   aiPump();
   agentPump();
+  livePump();
+  live.dirty = false;  // consumed by this frame
+  live.animFps = 0;    // the overlay asks again while it draws
+  if (overlay && !needFrame && !ui.animating && !job && !agent.active && !live.toolRunning && liveCached_ && frameOverlay(t)) return;
+  if (overlay) ui.fullFrameAfterAll();
+  chartHoverRegions_.clear();
+  pageCharts.swap(frameCharts);  // charts drawn in the previous frame
+  frameCharts.clear();
   stepPanelAnim();
   layout();
+  if (live.open && !showStart && !figZoomOpen) ui.block(liveHitRect());  // the Live AI pop-up owns its area; everything under it ignores the mouse
+  if (paletteOpen) ui.block({0, 0, float(g.W), float(g.H)});  // the command palette is on top of everything (drawPalette unblocks its own widgets)
   updateWindowTitle();
   handleShortcuts();
 
   // sync renderer
   if (styleDirty) {
     nv.setData(hasMap() ? &P->net : nullptr, &P->style, &P->bundles);
+    if (view == ViewKind::Timeline) posDirty = true;  // timeline x positions can depend on the selected score data
+    for (auto& L : livePane_) {
+      L.dataDirty = true;
+      if (L.kind == ViewKind::Timeline) L.posDirty = true;
+    }
     styleDirty = false;
     figSig.clear();
   }
   if (posDirty && hasMap()) {
-    if (animT0 < 0) nv.pos = targetPositions(view);
+    if (animT0 < 0) { nv.pos = targetPositions(view); nv.positionsChanged(); }
     nv.nodesDirty = nv.linksDirty = true;
+    for (auto& L : livePane_) L.posDirty = true;
     posDirty = false;
   }
   // view transition
@@ -495,8 +1028,9 @@ void App::frame() {
       for (size_t i = 0; i < nv.pos.size(); i++)
         for (int d = 0; d < 3; d++) nv.pos[i][d] = animFrom[i][d] + (animTo[i][d] - animFrom[i][d]) * e;
     }
-    nv.nodesDirty = nv.linksDirty = true;
     if (k >= 1) { animT0 = -1; if (animTo.size() == nv.pos.size()) nv.pos = animTo; }
+    nv.positionsChanged();
+    nv.nodesDirty = nv.linksDirty = true;
   }
   // smooth camera
   if (camTargetZoom > 0) {
@@ -524,26 +1058,74 @@ void App::frame() {
   nv.vp = canvasR;
   nv.uiScale = ui.s;
   nv.kind = view;
+  const bool mapHoverCanvas = hasMap() && workspace != WS_BIBLIOGRAPHY && view != ViewKind::Matrix && !mainChartOpen && !(papersOpen && hasCorpus()) &&
+                              !writerOpen && !readerOpen && page != PG_AI && !(splitActive() && splitMapPane() < 0);
+  // Resolve map hover before flags and the canvas signature. A target transition already scheduled this frame;
+  // computing it here lets the node overlay paint immediately instead of forcing a redundant follow-up frame.
+  if (mapHoverCanvas && drag == DR_NONE) {
+    bool overChrome = false;
+    for (const Rect& r : chromeRects) if (r.has(in.mx, in.my)) { overChrome = true; break; }
+    bool inside = canvasR.has(in.mx, in.my) && !overChrome && !ui.anyPopup() && !ui.anyModal() && !paletteOpen;
+    bool free = ui.active == 0 && drag != DR_MINIMAP;
+    hover = inside && free ? nv.hitNode(in.mx, in.my) : -1;
+  }
   if (hasMap()) updateFlags();
+  liveSync();  // the linked views of the split panes follow the data, the positions and the flags
 
   Theme th = canvasTheme(P->style);
-  bool netCanvas = hasMap() && view != ViewKind::Matrix && !mainChartOpen && page != PG_AI;
+  bool netCanvas = hasMap() && workspace != WS_BIBLIOGRAPHY && view != ViewKind::Matrix && !mainChartOpen && !(papersOpen && hasCorpus()) && !writerOpen && !readerOpen && page != PG_AI && !(splitActive() && splitMapPane() < 0);
+  if (netCanvas && view == ViewKind::Geo) {
+    const int mode = geoMode();
+    if (mode <= 0) geoHover = -1;
+    else {
+      geoEnsureWorld();
+      bool overChrome = false;
+      for (const Rect& r : chromeRects) if (r.has(in.mx, in.my)) { overChrome = true; break; }
+      bool inside = canvasR.has(in.mx, in.my) && !overChrome && !ui.anyPopup() && !ui.anyModal() && !paletteOpen;
+      bool free = ui.active == 0 && drag != DR_MINIMAP;
+      bool mouseFree = inside && free && hover < 0 && (drag == DR_NONE || drag == DR_PAN);
+      geoHover = mouseFree ? geoHit(in.mx, in.my) : -1;
+    }
+  }
+  const bool liveOn = liveAny();
   {  // Geo layers on a country network: overlay colours, or density underneath with the marks hidden
     bool g1 = hasMap() && view == ViewKind::Geo && geoMode() == 1;
     ViewKind tint = g1 && geoLayerKind == 1 ? ViewKind::Overlay : ViewKind::Geo;
     bool hide = g1 && geoLayerKind == 2;
     if (tint != nv.geoTint || hide != nv.hideMarks) { nv.geoTint = tint; nv.hideMarks = hide; nv.nodesDirty = nv.linksDirty = true; }
   }
-  if (netCanvas && view == ViewKind::Geo && geoMode() > 0) {
-    if (!nv.backgroundPainter) nv.backgroundPainter = [this](ID2D1DeviceContext* dc) { geoPaint(dc); };
-    nv.drawBackgroundLayer();
-  } else nv.backgroundPainter = nullptr;
-  g.beginGpu(netCanvas ? th.bg : ui.c.bg);
-  if (netCanvas) nv.renderGpu(th.bg);
-  g.endGpu();
-  if (!pendingViewFmt.empty()) doViewExport();
-  g.beginD2D();
-  if (netCanvas) nv.drawOverlay(g.dc.get(), th, showLabels, P->style.maxLabels);
+  // The canvas layer: rendered again only when one of its inputs changed (hover, selection, camera, positions, style
+  // ... all in the signature; a press, wheel or drag on the canvas renders too, because it moves things during this
+  // very frame); otherwise the GPU copy of the last render comes back and only the chrome is drawn.
+  bool cacheable = (netCanvas || liveOn) && canvasCacheOn && !scriptMode && pendingViewFmt.empty() && animT0 < 0 && camTargetZoom <= 0;
+  uint64_t csig = cacheable ? canvasSignature(th) : 0;
+  bool fromCopy = cacheable && !nv.nodesDirty && !nv.linksDirty && liveClean() && csig == canvasSig_ && g.canvasCopy.valid && g.canvasCopy.w == g.W && g.canvasCopy.h == g.H &&
+                  !(canvasR.has(in.mx, in.my) && (in.down[0] || in.down[1] || in.down[2] || in.wheel != 0 || drag != DR_NONE));
+  bool restored = false;
+  if (fromCopy) {
+    g.beginD2D();
+    restored = g.copyRestore(g.canvasCopy);
+    if (!restored) { g.endD2D(); g.canvasCopy.valid = false; }
+  }
+  if (restored) canvasHits++;
+  else {
+    canvasMisses++;
+    if (netCanvas && view == ViewKind::Geo && geoMode() > 0) {
+      if (!nv.backgroundPainter) nv.backgroundPainter = [this](ID2D1DeviceContext* dc) { geoPaint(dc, nv); };
+      nv.drawBackgroundLayer();
+    } else nv.backgroundPainter = nullptr;
+    if (liveOn) liveBackground();
+    g.beginGpu(netCanvas || liveOn ? th.bg : ui.c.bg);
+    if (netCanvas) nv.renderGpu(th.bg);
+    if (liveOn) liveRender(th);
+    g.endGpu();
+    if (!pendingViewFmt.empty()) doViewExport();
+    g.beginD2D();
+    if (netCanvas) nv.drawOverlay(g.dc.get(), th, showLabels, P->style.maxLabels);
+    if (liveOn) liveOverlay(th);
+    if (cacheable && g.copyCapture(g.canvasCopy)) canvasSig_ = csig;
+    else g.canvasCopy.valid = false;
+  }
   bool figOn = figZoomOpen && hasMap();
   if (!figOn) figZoomOpen = false;
   bool figOpening = figOn && figZoomT0 >= 0 && !scriptMode && ui.time - figZoomT0 < 0.22;  // app stays visible under the fade-in
@@ -559,6 +1141,12 @@ void App::frame() {
     drawLeft();
     drawInspector();
     drawStatus();
+    drawFetchPopups();  // Get PDF: the confirm card, the run's summary, a record's card (when open)
+    if (perfHud) drawPerfHud();
+    // keep a picture of the window without the overlay: while only the overlay moves, the next frames draw just it
+    liveCached_ = live.open && !scriptMode && !paletteOpen && !crashDialog && !ui.anyModal() && !ui.anyPopup() && ui.toasts.empty() && !ui.tipShowing() &&
+                  animT0 < 0 && camTargetZoom <= 0 && !job && uiQueue.empty() && !themeAnim.active && !themeAnim.pending && g.copyCapture(g.overlayCopy);
+    drawLive();
     drawPalette();
     drawSettings();
   }
@@ -568,25 +1156,62 @@ void App::frame() {
   drawCaption();
   ui.endModalLayer();
   ui.endFrame();
+  pointerHoverTarget_ = pointerHoverIdAt(ui.in.mx, ui.in.my);
+  drawThemeReveal(t);  // over everything, tooltips included: the old picture through the circle
   g.endD2D();
   if (pendingShot) {
     pendingShot = false;
     vector<uint8_t> px;
     int w = 0, h = 0;
     if (g.readback(px, w, h)) {
-      if (pendingViewCrop) {
-        int x0 = int(canvasR.x), y0 = int(canvasR.y), cw = int(canvasR.w), ch = int(canvasR.h);
+      int x0 = int(canvasR.x), y0 = int(canvasR.y), cw = int(canvasR.w), ch = int(canvasR.h);
+      bool cropOk = pendingViewCrop && cw > 0 && ch > 0 && x0 >= 0 && y0 >= 0 && x0 + cw <= w && y0 + ch <= h;
+      if (cropOk) {
         vector<uint8_t> crop(static_cast<size_t>(cw) * size_t(ch) * 4);
         for (int y = 0; y < ch; y++) memcpy(&crop[size_t(y) * size_t(cw) * 4], &px[(size_t(y0 + y) * size_t(w) + size_t(x0)) * 4], size_t(cw) * 4);
         px.swap(crop); w = cw; h = ch;
       }
-      if (pendingShotPath == "clipboard") setClipboardImage(hwnd, w, h, px.data());
+      if (pendingShotPath == "live-vision") liveSendPicture(px, w, h, cropOk);  // a still picture for the Live assistant (never a video stream)
+      else if (pendingShotPath == "clipboard") setClipboardImage(hwnd, w, h, px.data());
       else if (g.savePngWic(pendingShotPath, w, h, px.data(), 96 * ui.s)) { if (!scriptMode && pendingViewCrop) ui.toast("View exported", fileName(pendingShotPath), 1); }
+    } else if (pendingShotPath == "live-vision") {
+      liveSendPicture({}, 0, 0, false);
     }
     pendingViewCrop = false;
   }
   if (!g.present(!scriptMode)) occluded = true;
+  perfFrameDone(t, false, restored);
   if (ui.animating) needFrame = true;
+  // an event handled this frame may have changed state after the layers were drawn (a click selects a node after the
+  // map was rendered): one more frame settles it
+  if (in.pressed[0] || in.pressed[1] || in.pressed[2] || in.released[0] || in.released[1] || in.released[2] || in.dbl || in.wheel != 0 || in.hwheel != 0 || in.pinch != 0 || in.touch || !in.chars.empty() || !in.keys.empty()) needFrame = true;
+  if (showStart || figZoomOpen) liveCached_ = false;
+  liveFrameT_ = t;
+}
+
+// The overlay-only frame: the last full frame comes back from the GPU copy, then only the Live assistant's panel or
+// orb (and the caption buttons, which lie outside the copy's coverage of the overlay) are drawn on top. Everything
+// that could have changed underneath forces a full frame instead (input events, jobs, tools, other animations).
+bool App::frameOverlay(double t) {
+  if (!g.beginD2D()) return false;
+  if (!g.copyRestore(g.overlayCopy)) {
+    liveCached_ = false;
+    g.endD2D();
+    needFrame = true;
+    return true;  // nothing was presented; the full frame follows at once
+  }
+  drawLive();
+  ui.beginModalLayer();
+  drawCaption();
+  ui.endModalLayer();
+  ui.endFrame();
+  pointerHoverTarget_ = pointerHoverIdAt(ui.in.mx, ui.in.my);
+  g.endD2D();
+  if (!g.present(!scriptMode)) occluded = true;
+  perfFrameDone(t, true, true);
+  if (ui.animating || shotPending()) needFrame = true;  // a picture (camera button) is taken by a full frame
+  liveFrameT_ = t;
+  return true;
 }
 
 // =====================================================================================
@@ -600,6 +1225,44 @@ void App::handleShortcuts() {
       if (k == VK_ESCAPE && !ui.anyPopup()) ui.closeModal();
     return;
   }
+  if (readerOpen && !paletteOpen && !edit) {  // the reader owns the keyboard (reader.cpp); the application keys stay global
+    for (int k : in.keys) {
+      if (k == VK_F1) { paletteOpen = true; paletteQuery.clear(); continue; }
+      if (in.ctrl && !in.alt) {
+        if (k == 'O') { if (in.shift) cmdOpenProject(); else cmdOpenFiles(); continue; }
+        if (k == 'S') { cmdSaveProject(in.shift); continue; }
+        if (k == 'K' && !in.shift) { paletteOpen = !paletteOpen; paletteQuery.clear(); paletteSel = 0; ui.focus = 0; continue; }  // Ctrl+P prints here (reader.cpp)
+        if (k == 'J' && !in.shift) { setPage(page == PG_AI ? PG_NONE : PG_AI); continue; }
+        if (k == 'L' && in.shift) { if (live.open && live.mini) liveSetMini(false); else if (live.open) liveClose(); else liveOpen(false); continue; }
+        if (k == VK_OEM_COMMA) { openSettings(); continue; }
+      }
+      readerKey(k);
+    }
+    return;
+  }
+  if (writerOpen && !paletteOpen && !edit) {  // the writer owns the keyboard (its own map in writer.cpp); a few application keys stay global
+    for (int k : in.keys) {
+      if (k == VK_F1) { paletteOpen = true; paletteQuery.clear(); continue; }
+      if (k == VK_ESCAPE) {
+        if (figZoomOpen) figZoomOpen = false;
+        else if (writerPopupPrev_) writerPopupPrev_ = false;  // Esc closed a menu or dialog of the writer
+        else if (wed.hasSelection()) wed.setCaret(wed.caret);
+        else closeWriter();
+        continue;
+      }
+      if (in.ctrl && !in.alt) {
+        if (k == 'O') { if (in.shift) cmdOpenProject(); else cmdOpenFiles(); continue; }
+        if (k == 'S') { cmdSaveProject(in.shift); continue; }
+        if (k == 'P' && !in.shift) { paletteOpen = !paletteOpen; paletteQuery.clear(); paletteSel = 0; ui.focus = 0; continue; }
+        if (k == 'J' && !in.shift) { setPage(page == PG_AI ? PG_NONE : PG_AI); continue; }
+        if (k == 'L' && in.shift) { if (live.open && live.mini) liveSetMini(false); else if (live.open) liveClose(); else liveOpen(false); continue; }
+        if (k == VK_OEM_COMMA) { openSettings(); continue; }
+      }
+      writerKey(k);
+    }
+    writerTyped();
+    return;
+  }
   for (int k : in.keys) {
     if (in.ctrl) {
       switch (k) {
@@ -607,14 +1270,21 @@ void App::handleShortcuts() {
         case 'S': cmdSaveProject(in.shift); break;
         case 'Z': if (!edit) { if (in.shift) redo(); else undo(); } break;
         case 'Y': if (!edit) redo(); break;
-        case 'B': cmdBuild(); break;
+        case 'B': if (workspace == WS_VISUALIZATION) cmdBuild(); break;
         case 'J': setPage(page == PG_AI ? PG_NONE : PG_AI); break;
-        case 'E': if (hasMap()) { if (in.shift) cmdExportCurrentView(""); else setPage(PG_PUBLISH); } break;
+        case 'E': if (workspace == WS_VISUALIZATION && hasMap()) { if (in.shift) cmdExportCurrentView(""); else setPage(PG_PUBLISH); } break;
         case 'K': case 'P': paletteOpen = !paletteOpen; paletteQuery.clear(); paletteSel = 0; ui.focus = 0; break;
-        case 'F': ui.focus = ui.id("ti:search"); break;
+        case 'F': if (workspace == WS_BIBLIOGRAPHY) { openPapers(); ui.focus = ui.id("ti:papers:filter"); } else ui.focus = ui.id("ti:search"); break;
         case 'N': cmdNewProject(); break;
+        case 'T': if (hasCorpus() || workspace == WS_BIBLIOGRAPHY) {
+if (papersOpen) { papersOpen = false; if (workspace == WS_BIBLIOGRAPHY) { lastBibliographyRoute = BR_REVIEW; papersStatusFilter = -1; papersPdfFilter = 1; papersBuiltKey.clear(); page = PG_READ; settings.j.set("workspaceBibliographyRoute", int(lastBibliographyRoute)); } }
+          else openPapers();
+        } break;
         case 'C': if (!edit && in.shift) cmdCopyFigure(); break;
-        case 'L': if (hasMap()) cmdRelayout(); break;
+        case 'L': if (in.shift) { if (live.open && live.mini) liveSetMini(false); else if (live.open) liveClose(); else liveOpen(false); } else if (workspace == WS_VISUALIZATION && hasMap()) cmdRelayout(); break;
+        case 'W': if (in.shift) openWriter(); break;
+        case '2': if (in.shift && workspace == WS_VISUALIZATION && hasMap()) setSplit(splitMode == 1 ? 0 : 1); break;  // Ctrl+Shift+2 / 4: split view
+        case '4': if (in.shift && workspace == WS_VISUALIZATION && hasMap()) setSplit(splitMode == 3 ? 0 : 3); break;
         case VK_OEM_COMMA: openSettings(); break;
       }
       continue;
@@ -626,43 +1296,89 @@ void App::handleShortcuts() {
         if (!docBackStack.empty()) { docPreview = docBackStack.back(); docBackStack.pop_back(); }
         else docPreview = -1;
       }
-      else if (geoSel >= 0 && view == ViewKind::Geo) geoSel = -1;
-      else if (mainChartOpen) mainChartOpen = false;
-      else if (!selection.empty() || clusterFilter >= 0) { clearSelection(); clusterFilter = -1; }
-      else if (!search.empty()) { search.clear(); searchHits.clear(); }
+      else if (papersOpen) { papersOpen = false; if (workspace == WS_BIBLIOGRAPHY) { lastBibliographyRoute = BR_REVIEW; papersStatusFilter = -1; papersPdfFilter = 1; papersBuiltKey.clear(); page = PG_READ; settings.j.set("workspaceBibliographyRoute", int(lastBibliographyRoute)); } }
+      else if (workspace == WS_VISUALIZATION && geoSel >= 0 && view == ViewKind::Geo) geoSel = -1;
+      else if (workspace == WS_VISUALIZATION && mainChartOpen) mainChartOpen = false;
+      else if (workspace == WS_VISUALIZATION && splitMax >= 0) splitMax = -1;
+      else if (workspace == WS_VISUALIZATION && (!selection.empty() || clusterFilter >= 0)) { clearSelection(); clusterFilter = -1; }
+      else if (workspace == WS_VISUALIZATION && !search.empty()) { search.clear(); searchHits.clear(); invalidateFlags(); }
       continue;
     }
     if (k == VK_F1) { paletteOpen = true; paletteQuery.clear(); continue; }
     if (edit || paletteOpen) continue;
+    if (papersOpen && hasCorpus() && papersKey(k)) continue;
     if (figZoomOpen) {
       if (k == '0' || k == VK_NUMPAD0) { figZoomK = 1; figZoomX = figZoomY = 0; }
       else if (k == VK_OEM_PLUS || k == VK_ADD) figZoomK = clampv(figZoomK * 1.25, 0.25, 40.0);
       else if (k == VK_OEM_MINUS || k == VK_SUBTRACT) figZoomK = clampv(figZoomK / 1.25, 0.25, 40.0);
       continue;
     }
-    if (k >= '1' && k <= '7' && hasMap()) setView(kViews[k - '1'].v);
-    else if (k == 'F' && hasMap()) { mainChartOpen = false; nv.fit(); camTargetZoom = -1; }
-    else if (k == 'L') showLabels = !showLabels;
-    else if (k == 'H' && hasMap()) { P->style.hulls = !P->style.hulls; styleDirty = true; }
-    else if (k == 'N' && hasMap()) { P->style.clusterNames = !P->style.clusterNames; styleDirty = true; }
-    else if (k == 'M') showMinimap = !showMinimap;
-    else if (k == 'G') showLegend = !showLegend;
-    else if (k == 'I') inspectorOpen = !inspectorOpen;
-    else if (k == VK_OEM_2 /* / */) ui.focus = ui.id("ti:search");
-    else if (k == VK_OEM_PLUS || k == VK_ADD) { if (hasMap()) { camTargetZoom = (camTargetZoom > 0 ? camTargetZoom : nv.cam.zoom) * 1.3; camTargetX = nv.cam.x; camTargetY = nv.cam.y; } }
-    else if (k == VK_OEM_MINUS || k == VK_SUBTRACT) { if (hasMap()) { camTargetZoom = (camTargetZoom > 0 ? camTargetZoom : nv.cam.zoom) / 1.3; camTargetX = nv.cam.x; camTargetY = nv.cam.y; } }
-    else if (k == VK_TAB && !searchHits.empty()) { searchIdx = (searchIdx + (in.shift ? -1 : 1) + int(searchHits.size())) % int(searchHits.size()); focusOn(searchHits[size_t(searchIdx)]); }
+    if (workspace == WS_VISUALIZATION && k >= '1' && k <= '7' && hasMap()) setView(kViews[k - '1'].v);
+    else if (workspace == WS_VISUALIZATION && k == 'F' && hasMap()) { mainChartOpen = false; nv.fit(); camTargetZoom = -1; }
+    else if (workspace == WS_VISUALIZATION && k == 'L') showLabels = !showLabels;
+    else if (workspace == WS_VISUALIZATION && k == 'H' && hasMap()) { P->style.hulls = !P->style.hulls; styleDirty = true; }
+    else if (workspace == WS_VISUALIZATION && k == 'N' && hasMap()) { P->style.clusterNames = !P->style.clusterNames; styleDirty = true; }
+    else if (workspace == WS_VISUALIZATION && k == 'M') showMinimap = !showMinimap;
+    else if (workspace == WS_VISUALIZATION && k == 'G') showLegend = !showLegend;
+    else if (workspace == WS_VISUALIZATION && k == 'I') inspectorOpen = !inspectorOpen;
+    else if (workspace == WS_VISUALIZATION && k == VK_OEM_2 /* / */) ui.focus = ui.id("ti:search");
+    else if (workspace == WS_VISUALIZATION && (k == VK_OEM_PLUS || k == VK_ADD)) { if (hasMap()) { camTargetZoom = (camTargetZoom > 0 ? camTargetZoom : nv.cam.zoom) * 1.3; camTargetX = nv.cam.x; camTargetY = nv.cam.y; } }
+    else if (workspace == WS_VISUALIZATION && (k == VK_OEM_MINUS || k == VK_SUBTRACT)) { if (hasMap()) { camTargetZoom = (camTargetZoom > 0 ? camTargetZoom : nv.cam.zoom) / 1.3; camTargetX = nv.cam.x; camTargetY = nv.cam.y; } }
+    else if (workspace == WS_VISUALIZATION && k == VK_TAB && !searchHits.empty()) { searchIdx = (searchIdx + (in.shift ? -1 : 1) + int(searchHits.size())) % int(searchHits.size()); focusOn(searchHits[size_t(searchIdx)]); }
   }
+}
+
+namespace {
+// Sections of the command palette when it is browsed without a query (in this order).
+const char* const kPaletteGroups[] = {"File", "Map", "Views", "Pages", "Display", "Export", "Analyse", "AI", "Live AI", "Looks", "Tools", "Help", "Items", "Other"};
+const char* paletteGroupFor(const string& id) {
+  static const std::map<string, const char*> byId = {
+      {"open", "File"}, {"openproj", "File"}, {"save", "File"}, {"saveas", "File"}, {"new", "File"}, {"sample", "File"}, {"sample2", "File"}, {"papers", "Views"}, {"writer", "Views"}, {"writerpreview", "Export"}, {"writercompile", "Export"}, {"writeropenpdf", "Export"}, {"writerpdf", "Export"}, {"writerdocx", "Export"}, {"writerhtml", "Export"}, {"writerlatex", "Export"},
+      {"build", "Map"}, {"relayout", "Map"}, {"recluster", "Map"}, {"bundle", "Map"}, {"fit", "Map"}, {"maphist", "Map"}, {"undo", "Map"}, {"redo", "Map"}, {"vosload", "Map"}, {"vosexport", "Map"},
+      {"labels", "Display"}, {"legend", "Display"}, {"hulls", "Display"}, {"names", "Display"}, {"theme", "Display"}, {"settings", "Display"},
+      {"svg", "Export"}, {"pdf", "Export"}, {"png", "Export"}, {"copyfig", "Export"}, {"viewany", "Export"}, {"figall", "Export"}, {"viewsvg", "Export"}, {"viewpdf", "Export"}, {"viewpng", "Export"},
+      {"recwos", "Export"}, {"recris", "Export"}, {"reccsv", "Export"}, {"items", "Export"}, {"methods", "Export"},
+      {"trtopics", "Analyse"}, {"rpys", "Analyse"}, {"topdocs", "Analyse"}, {"clyears", "Analyse"}, {"topdoc", "Analyse"},
+      {"live", "Live AI"}, {"live:talk", "Live AI"}, {"live:orb", "Live AI"}, {"livevad", "Live AI"},
+      {"perf", "Tools"}, {"textcache", "Tools"}, {"canvascache", "Tools"}, {"cite", "Help"}};
+  auto it = byId.find(id);
+  if (it != byId.end()) return it->second;
+  if (id.rfind("view", 0) == 0) return "Views";
+  if (id.rfind("ai:", 0) == 0) return "AI";
+  if (id.rfind("page", 0) == 0) return "Pages";
+  if (id.rfind("rd", 0) == 0) return "Read";
+  if (id.rfind("look:", 0) == 0) return "Looks";
+  return "Other";
+}
+}  // namespace
+
+void App::cmdCite() {
+  string apa = softwareReference(false), bib = softwareReference(true);
+  setClipboardText(hwnd, apa + "\n\n" + bib + "\n");
+  ui.toast("Copied", "APA and BibTeX references to VOSStudio Native " + string(kAppVersion) + " are on the clipboard. The methods paragraph carries the same reference.", 1, 5);
 }
 
 void App::buildCommands() {
   commands.clear();
-  auto add = [&](const string& id, const string& label, const string& hint, const string& sc, const string& ic, std::function<void()> fn) { commands.push_back({id, label, hint, sc, ic, fn}); };
+  auto add = [&](const string& id, const string& label, const string& hint, const string& sc, const string& ic, std::function<void()> fn) { commands.push_back({id, label, hint, sc, ic, fn, ""}); };
   add("open", "Open bibliographic files…", "WoS, Scopus, RIS, BibTeX, OpenAlex JSON", "Ctrl+O", "folder", [this] { cmdOpenFiles(); });
   add("openproj", "Open project…", ".vosproj bundle", "Ctrl+Shift+O", "file", [this] { cmdOpenProject(); });
   add("save", "Save project", "Self-contained bundle with records and map", "Ctrl+S", "save", [this] { cmdSaveProject(false); });
   add("saveas", "Save project as…", "", "Ctrl+Shift+S", "save", [this] { cmdSaveProject(true); });
   add("new", "New project", "Start over", "Ctrl+N", "file", [this] { cmdNewProject(); });
+  add("papers", "Papers table", "Every record as a sortable, filterable list", "Ctrl+T", "table", [this] { if (hasCorpus() || workspace == WS_BIBLIOGRAPHY) openPapers(); else ui.toast("No records", "Load records first.", 2); });
+  add("writer", "Writer (document editor)", "Write and edit visually; export PDF, Word, HTML or an advanced LaTeX source bundle", "Ctrl+Shift+W", "writer", [this] { if (writerOpen) closeWriter(); else openWriter(); });
+  add("writerpreview", "Writer: side-by-side PDF preview", "Show or hide the latest compiled PDF beside the document", "", "eye", [this] { writerSetPdfPreview(!writerPdfPreviewOpen_); });
+  add("writercompile", "Writer: compile LaTeX preview", "Compile or recompile a PDF from the visual document", "", "play", [this] { writerCompileLatex(); });
+  add("writeropenpdf", "Writer: open compiled PDF separately", "Open the latest compiled PDF in the system viewer", "", "external", [this] { writerOpenPdfSeparately(); });
+  add("split1", "Split view: two panes side by side", "The map and a chart, or two charts, next to each other", "Ctrl+Shift+2", "table", [this] { if (!hasMap()) ui.toast("Split view", "Build a map first.", 2); else setSplit(splitMode == 1 ? 0 : 1); });
+  add("split2", "Split view: two panes, one above the other", "", "", "table", [this] { if (!hasMap()) ui.toast("Split view", "Build a map first.", 2); else setSplit(splitMode == 2 ? 0 : 2); });
+  add("split3", "Split view: four panes", "Four charts of the loaded data at once (one may be the live map)", "Ctrl+Shift+4", "grid", [this] { if (!hasMap()) ui.toast("Split view", "Build a map first.", 2); else setSplit(splitMode == 3 ? 0 : 3); });
+  add("split0", "Split view: single pane", "Back to the map alone", "", "fit", [this] { setSplit(0); });
+  add("writerpdf", "Writer: export as PDF\xE2\x80\xA6", "The document as a print-ready PDF", "", "download", [this] { writerExport("pdf"); });
+  add("writerdocx", "Writer: export as Word\xE2\x80\xA6", "The document as an editable .docx", "", "download", [this] { writerExport("docx"); });
+  add("writerhtml", "Writer: export as web page\xE2\x80\xA6", "The document as one self-contained .html file", "", "download", [this] { writerExport("html"); });
+  add("writerlatex", "Writer: export LaTeX source bundle\xE2\x80\xA6", "Advanced source export with companion BibTeX and vector figure PDFs", "", "download", [this] { writerExport("latex"); });
   add("sample", "Load sample data (Web of Science)", "140 records, 2016–2024", "", "sparkle", [this] { cmdSample(false); });
   add("sample2", "Load sample data (Scopus)", "90 records", "", "sparkle", [this] { cmdSample(true); });
   add("build", "Build map", "Run the analysis with the current builder settings", "Ctrl+B", "play", [this] { cmdBuild(); });
@@ -684,12 +1400,20 @@ void App::buildCommands() {
   add("legend", "Toggle cluster legend", "Show or hide the legend card on the canvas", "G", "legend", [this] { showLegend = !showLegend; });
   add("recwos", "Export records (Web of Science format)…", "Readable by VOSviewer, bibliometrix, CiteSpace", "", "download", [this] { cmdExportRecords(false, "wos"); });
   add("recris", "Export records (RIS)…", "", "", "download", [this] { cmdExportRecords(false, "ris"); });
+  add("recbib", "Export records (BibTeX)…", "", "", "download", [this] { cmdExportRecords(false, "bib"); });
   add("reccsv", "Export records (CSV)…", "Scopus column names", "", "download", [this] { cmdExportRecords(false, "csv"); });
   add("items", "Export items table (CSV)…", "", "", "table", [this] { cmdExportItemsCsv(); });
   add("methods", "Copy methods paragraph", "Reproducible description of the map", "", "copy", [this] { if (hasMap()) { setClipboardText(hwnd, P->methods()); ui.toast("Copied", "Methods paragraph copied to the clipboard.", 1); } });
-  add("theme", "Toggle light / dark theme", "", "", "sun", [this] { setTheme(!ui.dark); });
+  add("theme", "Toggle light / dark theme", "", "", "sun", [this] { setTheme(!themeTarget()); });
   add("settings", "Settings", "AI provider, OpenAlex API key, appearance", "Ctrl+,", "settings", [this] { settingsWanted = true; });
+  add("live", live.open && live.mini ? "Live AI: open the panel" : live.open ? "Close Live AI" : "Live AI", "Talk or type with the assistant while it works the app for you", "Ctrl+Shift+L", "live", [this] { if (live.open && live.mini) liveSetMini(false); else if (live.open) liveClose(); else liveOpen(false); });
+  add("live:talk", "Live AI: start talking", "Voice session with spoken replies (Gemini Live)", "", "mic", [this] { liveOpen(true); liveSetMini(false); });
+  add("live:orb", "Live AI: voice orb", "A small circle that listens and answers by voice; right-click it for the panel", "", "orb", [this] { liveOpen(true); liveSetMini(true); });
   add("labels", "Toggle labels", "", "L", "tag", [this] { showLabels = !showLabels; });
+  add("livevad", "Live AI: toggle speech detection in the app", "On (recommended): the app tells the model when you start and stop talking. Off: the server's own voice detection, which can leave questions unanswered", "", "mic", [this] { runCommand("livevad"); });
+  add("perf", "Toggle performance overlay", "Frames per second, frame time, cache hit rates, CPU and memory (for comparing versions and settings)", "", "activity", [this] { perfHud = !perfHud; perf_ = PerfWindow{}; perfShown_ = PerfWindow{}; perfT0_ = 0; perfCpuT_ = 0; needFrame = true; });
+  add("textcache", "Toggle text cache", "Reuse DirectWrite text layouts between frames (off: lay every text out again on every frame)", "", "type", [this] { setTextCache(!ui.textCacheOn); ui.toast(ui.textCacheOn ? "Text cache on" : "Text cache off", ui.textCacheOn ? "Text layouts are kept between frames." : "Every text is laid out again on every frame.", 1); });
+  add("canvascache", "Toggle canvas cache", "Reuse the last render of the map while nothing on it changed (off: render every frame)", "", "layers", [this] { setCanvasCache(!canvasCacheOn); ui.toast(canvasCacheOn ? "Canvas cache on" : "Canvas cache off", canvasCacheOn ? "The map is rendered again only when something on it changes." : "The map is rendered on every frame.", 1); });
   add("hulls", "Toggle cluster hulls", "", "H", "hull", [this] { P->style.hulls = !P->style.hulls; styleDirty = true; });
   add("names", "Toggle cluster names", "", "N", "type", [this] { P->style.clusterNames = !P->style.clusterNames; styleDirty = true; });
   add("fit", "Fit map to window", "", "F", "fit", [this] { if (hasMap()) nv.fit(); });
@@ -713,9 +1437,190 @@ void App::buildCommands() {
   }
   for (int p = 0; p < PG_COUNT; p++) add("page" + std::to_string(p), string("Go to ") + kPageTitles[p], kPageSubs[p], "", kPageIcons[p], [this, p] { setPage(p); });
   for (auto& lk : lookPresets()) { string id = lk.id; add("look:" + id, string("Look: ") + lk.label, lk.sub, "", "look", [this, id] { applyLook(P->style, id); P->style.darkTheme = ui.dark; styleDirty = true; if (hasMap()) { nv.fit(); camTargetZoom = -1; } }); }
+  add("cite", "Cite VOSStudio\xE2\x80\xA6", "Copy a reference for your paper (APA and BibTeX)", "", "copy", [this] { cmdCite(); });
+  add("rdattach", "Attach PDFs\xE2\x80\xA6", "Add the papers' PDF files to the reading library (linked to the records by DOI or title)", "", "book", [this] { readerAttachDialog(-1); });
+  add("rdnotes", "Export reading notes (Markdown)", "Every paper's status, notes, highlights and codes as one Markdown file", "", "download", [this] { readerExportNotes(""); });
+  add("rdcoding", "Export the coding matrix (CSV)", "One row per paper: status, rating, tags and the passages coded Aim, Method, Finding, Theory, Gap, Quote, Question", "", "table", [this] { readerExportCoding(); });
+  for (auto& c : commands) c.group = paletteGroupFor(c.id);
 }
 
-void App::setPage(int p) { page = (page == p) ? PG_NONE : p; if (p == PG_NONE) page = PG_NONE; }
+void App::setWorkspace(Workspace target) {
+  if (target == workspace) return;
+
+  // Remember each workspace's route before changing the shared shell. The map, paper selection, writer document,
+  // and reader document remain in memory; only the active surface is switched.
+  if (workspace == WS_VISUALIZATION) {
+    if (page == PG_NONE) lastVisualizationPage = PG_NONE;
+    else if (page != PG_AI && page != PG_READ && page != PG_WRITER && page >= PG_DATA && page <= PG_PUBLISH) lastVisualizationPage = page;
+    lastVisualizationChartOpen = mainChartOpen;
+  } else if (page != PG_AI) {
+    if (writerOpen || page == PG_WRITER) lastBibliographyRoute = BR_WRITE;
+    else if (readerOpen) lastBibliographyRoute = BR_REVIEW;
+    else if (!papersOpen && page == PG_READ) lastBibliographyRoute = BR_REVIEW;
+    // Papers and Review share the persistent PG_READ library sidebar and papers canvas; keep the explicit route.
+  }
+
+  if (workspace == WS_BIBLIOGRAPHY && readerOpen) {
+    readerStorePosition();
+    if (PdfItem* item = readerItem()) bibliographyReaderItem = item->id;
+    bibliographyReaderWasOpen = !bibliographyReaderItem.empty();
+  }
+  if (readerOpen) closeReader();
+  writerOpen = false;  // wdoc, caret, zoom and scroll are retained for the next visit
+  ui.focus = 0;
+  ui.closePopup();
+  inspectorOpen = false;  // the inspector is a Visualization tool, not a Bibliography destination
+  papersOpen = false;
+  figZoomOpen = false;
+  workspace = target;
+  settings.j.set("workspace", int(workspace));
+
+  if (workspace == WS_VISUALIZATION) {
+    page = lastVisualizationPage;
+    mainChartOpen = lastVisualizationChartOpen;
+  } else {
+    mainChartOpen = false;  // Bibliography has no network/map destination of its own
+    switch (lastBibliographyRoute) {
+      case BR_PAPERS:
+        page = PG_READ;
+        papersOpen = true;
+        break;
+      case BR_REVIEW:
+        page = PG_READ;
+        papersOpen = !bibliographyReaderWasOpen;
+        if (bibliographyReaderWasOpen && !bibliographyReaderItem.empty()) {
+          openReader(bibliographyReaderItem);
+          bibliographyReaderWasOpen = false;
+        }
+        break;
+      case BR_WRITE:
+        page = PG_WRITER;
+        openWriter();
+        break;
+    }
+  }
+  settings.j.set("workspaceVisualPage", lastVisualizationPage);
+  settings.j.set("workspaceBibliographyRoute", int(lastBibliographyRoute));
+  settings.j.set("railExpanded", railExpanded);
+  needFrame = true;
+}
+
+void App::activateWorkspaceNav(const string& id) {
+  if (workspace == WS_VISUALIZATION) {
+    if (id == "map") { showVisualizationMap(); return; }
+    for (const RailItem& item : kVisualizationNav) {
+      if (id != item.id) continue;
+      setPage(item.action == RailAction::Page ? item.page : PG_NONE);
+      return;
+    }
+    return;
+  }
+
+  if (id == "papers") { openPapers("", -1, true, false); return; }
+  if (id == "review") {
+    applyPaperView(-1, 1, papersCollectionFilter, papersTagFilter, papersFilter, BR_REVIEW);
+    ui.focus = 0;
+    return;
+  }
+  if (id == "write") { openWriter(); return; }
+}
+
+void App::showVisualizationMap() {
+  if (workspace != WS_VISUALIZATION) setWorkspace(WS_VISUALIZATION);
+  if (readerOpen) closeReader();
+  writerOpen = false;
+  papersOpen = false;
+  mainChartOpen = false;
+  figZoomOpen = false;
+  page = hasMap() ? PG_NONE : PG_BUILD;
+  lastVisualizationPage = page;
+  lastVisualizationChartOpen = false;
+  ui.focus = 0;
+  needFrame = true;
+}
+
+void App::showPapersOnMap() {
+  if (!hasMap()) { ui.toast("No map yet", "Build a Visualization map before locating these papers.", 2, 4); return; }
+
+  vector<int> targetRecords;
+  if (papersSelectedCount() > 0) {
+    for (size_t i = 0; i < papersSel.size(); i++) if (papersSel[i]) targetRecords.push_back(int(i));
+  } else if (papersCursor >= 0) targetRecords.push_back(papersCursor);
+  if (targetRecords.empty()) { ui.toast("Select papers", "Select one or more rows, or focus a paper, before showing them on the map.", 2, 3); return; }
+
+  std::unordered_set<int> wanted(targetRecords.begin(), targetRecords.end());
+  vector<int> nodes;
+  nodes.reserve(std::min<size_t>(P->net.nodes.size(), targetRecords.size() * 4));
+  for (size_t i = 0; i < P->net.nodes.size(); i++) {
+    const Node& nd = P->net.nodes[i];
+    bool hit = false;
+    for (int rec : nd.recs) if (wanted.count(rec)) { hit = true; break; }
+    if (hit) nodes.push_back(int(i));
+  }
+  if (nodes.empty()) { ui.toast("No matching map items", "The selected papers are not represented by items in the current map.", 2, 4); return; }
+
+  if (workspace != WS_VISUALIZATION) setWorkspace(WS_VISUALIZATION);
+  papersOpen = false;
+  writerOpen = false;
+  mainChartOpen = false;
+  page = PG_NONE;
+  lastVisualizationPage = PG_NONE;
+  lastVisualizationChartOpen = false;
+  settings.j.set("workspaceVisualPage", int(lastVisualizationPage));
+  selection = nodes;
+  invalidateFlags();
+  closeDoc();
+  scopeChanged();
+  inspectorOpen = true;
+  nv.nodesDirty = nv.linksDirty = true;
+  double x0 = 1e18, y0 = 1e18, x1 = -1e18, y1 = -1e18;
+  for (int i : nodes) if (size_t(i) < nv.pos.size()) {
+    x0 = std::min(x0, double(nv.pos[size_t(i)][0])); x1 = std::max(x1, double(nv.pos[size_t(i)][0]));
+    y0 = std::min(y0, double(nv.pos[size_t(i)][1])); y1 = std::max(y1, double(nv.pos[size_t(i)][1]));
+  }
+  if (x0 <= x1 && view != ViewKind::ThreeD && view != ViewKind::Matrix) {
+    camTargetX = (x0 + x1) * 0.5;
+    camTargetY = (y0 + y1) * 0.5;
+    double w = std::max(1.0, x1 - x0), h = std::max(1.0, y1 - y0);
+    camTargetZoom = clampv(std::min((canvasR.w - 120 * ui.s) / w, (canvasR.h - 120 * ui.s) / h), nv.fitZoom() * 0.7, nv.fitZoom() * 8.0);
+  }
+  ui.toast("Showing papers on the map", plural(long(nodes.size()), P->net.unitNoun), 1, 3);
+  needFrame = true;
+}
+
+void App::setPage(int p) {
+  Workspace beforeWorkspace = workspace;
+  if ((p == PG_READ || p == PG_WRITER) && workspace != WS_BIBLIOGRAPHY) setWorkspace(WS_BIBLIOGRAPHY);
+  else if (p >= PG_DATA && p <= PG_PUBLISH && p != PG_READ && p != PG_WRITER && workspace != WS_VISUALIZATION) setWorkspace(WS_VISUALIZATION);
+  bool switchedWorkspace = beforeWorkspace != workspace;
+  if (p == PG_WRITER) {  // the Write page opens the writer in the main area; a second click only folds its side panel
+    if (!switchedWorkspace && page == PG_WRITER && !readerOpen) { page = PG_NONE; return; }
+    if (!writerOpen) openWriter();  // captures the Bibliography return route before it changes the page
+    else { page = PG_WRITER; lastBibliographyRoute = BR_WRITE; settings.j.set("workspaceBibliographyRoute", int(lastBibliographyRoute)); }
+    return;
+  }
+  if (p == PG_READ) {  // the persistent Library sidebar stays beside the reader or attached-PDF table
+    lastBibliographyRoute = BR_REVIEW;
+    papersStatusFilter = -1;
+    papersPdfFilter = 1;
+    if (readerOpen) { bibliographyReaderReturnRoute = BR_REVIEW; bibliographyReaderReturnToPapers = true; }
+    papersBuiltKey.clear();
+    settings.j.set("workspaceBibliographyRoute", int(lastBibliographyRoute));
+    if (writerOpen) writerOpen = false;
+    page = PG_READ;
+    papersOpen = !readerOpen;
+    mainChartOpen = false;
+    needFrame = true;
+    return;
+  }
+  if (readerOpen && p != PG_NONE) closeReader();  // any other stage leaves the reader (its position is kept)
+  page = (page == p) ? PG_NONE : p;
+  if (p == PG_NONE) page = PG_NONE;
+  if (workspace == WS_VISUALIZATION && p != PG_AI) lastVisualizationPage = page;
+  else if (workspace == WS_BIBLIOGRAPHY && (writerOpen || page == PG_WRITER)) lastBibliographyRoute = BR_WRITE;
+  settings.j.set("workspaceVisualPage", lastVisualizationPage);
+  settings.j.set("workspaceBibliographyRoute", int(lastBibliographyRoute));
+}
 
 void App::pushUndo(const string& what) {
   if (!hasMap()) return;
@@ -760,6 +1665,7 @@ void App::undo() {
   P->style.darkTheme = ui.dark;
   styleCommitted = styleToJson(P->style);
   P->bundles = Bundles();
+  invalidateFlags();
   styleDirty = posDirty = true;
   cinfoValid = false;
   ui.toast("Undo", e.what, 0, 1.5);
@@ -777,6 +1683,7 @@ void App::redo() {
   styleFromJson(P->style, e.style);
   P->style.darkTheme = ui.dark;
   styleCommitted = styleToJson(P->style);
+  invalidateFlags();
   styleDirty = posDirty = true;
   cinfoValid = false;
   ui.toast("Redo", e.what, 0, 1.5);
@@ -793,9 +1700,16 @@ void App::cmdOpenFiles() {
 void App::cmdOpenAny() { cmdOpenFiles(); }
 
 bool App::dropFiles(const vector<string>& files) {
-  vector<string> bib, vos;
+  vector<string> bib, vos, pdfs;
+  for (auto& f : files) if (lower(fileExt(f)) == "pdf") pdfs.push_back(f);
+  if (!pdfs.empty()) {  // PDFs join the reading library (linked to a record when the DOI or title matches); one PDF opens
+    int rec = (papersOpen || docPreview >= 0) && docPreview >= 0 ? docPreview : -1;
+    readerAttach(pdfs, rec, pdfs.size() == 1 && files.size() == 1);
+    if (pdfs.size() == files.size()) return true;
+  }
   for (auto& f : files) {
     string ext = fileExt(f);
+    if (lower(ext) == "pdf") continue;
     if (ext == "vosproj") { cmdOpenProject(f); return true; }
     bool ok = false;
     string head = readFileU(f, &ok).substr(0, 4096);
@@ -836,16 +1750,29 @@ void App::cmdAddFiles(const vector<string>& files) {
       if (j.cancel) break;
     }
   }, [this, out] {
-    int added = 0, before = int(P->corpus.recs.size()), dupBefore = P->corpus.duplicatesRemoved;
+    int added = 0, before = int(P->corpus.recs.size()), idConflicts = 0;
     for (auto& p : *out) {
       if (p.recs.empty()) { ui.toast("Skipped " + fileName(p.name), p.err, 2, 7); continue; }
       added += P->addRecords(p.name, p.f, p.recs);
+      idConflicts += P->lastRecordIdConflicts;
     }
     if (added > 0 || int(P->corpus.recs.size()) != before) {
-      int dups = P->corpus.duplicatesRemoved - dupBefore;
-      ui.toast("Records imported", plural(added, "record") + " added" + (dups ? " · " + plural(dups, "duplicate") + " merged" : "") + " · " + fmtInt(long(P->corpus.recs.size())) + " total", 1, 5);
+      int duplicateGroups = 0;
+      for (const RecordDuplicateGroup& group : recordDuplicateGroups(P->corpus.recs)) {
+        bool pending = false;
+        for (int index : group.indices) if (index >= 0 && size_t(index) < P->corpus.recs.size() && !P->corpus.recs[size_t(index)].duplicateReviewed) pending = true;
+        if (pending) duplicateGroups++;
+      }
+      string importDetail = plural(added, "record") + " added" + (duplicateGroups ? " · " + plural(duplicateGroups, "duplicate group") + " waiting for review" : "") + " · " + fmtInt(long(P->corpus.recs.size())) + " total";
+      if (idConflicts) importDetail += " · " + plural(idConflicts, "reused local ID") + " assigned new IDs to keep records distinct";
+      ui.toast("Records imported", importDetail, 1, 6);
       pageStateReset();
-      if (!hasMap()) { page = PG_BUILD; }
+      if (workspace == WS_BIBLIOGRAPHY) {
+        lastBibliographyRoute = BR_PAPERS;
+        page = PG_NONE;
+        papersOpen = true;
+        settings.j.set("workspaceBibliographyRoute", int(lastBibliographyRoute));
+      } else if (!hasMap()) page = PG_BUILD;
     }
   });
 }
@@ -854,7 +1781,8 @@ void App::cmdSample(bool scopus) {
   int n = P->addSample(scopus);
   pageStateReset();
   ui.toast("Sample loaded", plural(n, "record") + (scopus ? " (Scopus CSV)" : " (Web of Science)") + "", 1, 5);
-  if (!hasMap()) page = PG_BUILD;
+  if (workspace == WS_BIBLIOGRAPHY) { lastBibliographyRoute = BR_PAPERS; page = PG_READ; papersOpen = true; settings.j.set("workspaceBibliographyRoute", int(lastBibliographyRoute)); }
+  else if (!hasMap()) page = PG_BUILD;
 }
 
 void App::pageStateReset() {
@@ -875,7 +1803,7 @@ void App::pageStateReset() {
 }
 
 void App::cmdBuild() {
-  if (!hasCorpus()) { ui.toast("No data yet", "Open a bibliographic file or load the sample first.", 2); page = PG_DATA; return; }
+  if (!hasCorpus()) { ui.toast("No data yet", "Open a bibliographic file or load the sample first.", 2); setPage(PG_DATA); return; }
   auto res = std::make_shared<Network>();
   auto rep = std::make_shared<BuildReport>();
   Project* p = P.get();
@@ -891,10 +1819,14 @@ void App::cmdBuild() {
 }
 
 void App::afterMapChanged(bool fit) {
+  compareClose(); cmpThA = cmpThB = 0;
+  geoSig_.clear();  // country classification is keyed to this map's node labels, even when vector storage was reused
   selection.clear(); hover = -1; clusterFilter = -1; searchHits.clear();
+  invalidateFlags();
   pos3dValid = false; pos3d.clear();
   cinfoValid = false; stabValid = false; figSig.clear();
   mainChartOpen = false;
+  papersOpen = workspace == WS_BIBLIOGRAPHY && !writerOpen && !readerOpen && lastBibliographyRoute != BR_WRITE;  // maps never take over Bibliography
   pdiffValid = false; sweepValid = false; diffRestore.active = false;  // 1.8
   if (geoAfterBuild) { geoAfterBuild = false; if (geoAvailable()) view = ViewKind::Geo; }
   if (view == ViewKind::Geo && !geoAvailable()) view = ViewKind::Network;
@@ -904,8 +1836,10 @@ void App::afterMapChanged(bool fit) {
   nv.pos.clear();
   nv.flags.clear();
   nv.setData(hasMap() ? &P->net : nullptr, &P->style, &P->bundles);
+  for (auto& L : livePane_) { L.dataDirty = true; L.posDirty = true; L.fitted = false; }
   animT0 = -1;
   nv.pos = targetPositions(view);
+  nv.positionsChanged();
   nv.nodesDirty = nv.linksDirty = true;
   nv.kind = view;
   nv.vp = canvasR;
@@ -943,6 +1877,7 @@ void App::cmdRecluster() {
   if (!hasMap()) return;
   pushUndo("Clustering");
   P->recluster();
+  invalidateFlags();
   cinfoValid = false;
   styleDirty = true;
   ui.toast("Clusters updated", plural(P->net.nClusters, "cluster") + " · Q " + fmtFixed(P->last.Q, 3), 1, 3);
@@ -963,7 +1898,8 @@ void App::cmdBundles() {
 
 // ------------------------------------------------------------------ project
 void App::cmdSaveProject(bool saveAs) {
-  if (!hasCorpus() && !hasMap()) { ui.toast("Nothing to save", "Load data or build a map first.", 2); return; }
+  if (!hasCorpus() && !hasMap() && wdoc.empty() && !P->library.hasData()) { ui.toast("Nothing to save", "Load data, add papers or write something first.", 2); return; }
+  if (live.open) liveSaveToChat();  // the voice conversation so far goes into the project with the Assistant's chat
   string path = P->path;
   if (saveAs || path.empty()) {
     path = saveFileDialog(hwnd, "Save project", {{"VOSStudio project", "*.vosproj"}}, exportName("vosproj"), "vosproj");
@@ -971,6 +1907,7 @@ void App::cmdSaveProject(bool saveAs) {
   }
   string err;
   mapsToProject();
+  writerToProject();
   if (P->save(path, &err)) {
     P->path = path;
     P->dirty = false;
@@ -993,14 +1930,22 @@ void App::cmdOpenProject(const string& path0) {
   if (!np->open(path, &err)) { ui.toast("Could not open project", err, 3, 7); return; }
   np->path = path;
   np->dirty = false;
+  readerStorePosition();
+  readerProjectChanged();
   P = std::move(np);
   P->style.darkTheme = ui.dark;
   settings.addRecent(path);
   settings.save();
   undoStack.clear(); redoStack.clear();
+  papersStatusFilter = papersPdfFilter = -1;
+  papersCollectionFilter.clear(); papersTagFilter.clear(); papersFilter.clear();
+  papersNewCollectionOpen = papersNewViewOpen = false;
+  papersNewCollectionName.clear(); papersNewViewName.clear(); papersNewTagName.clear(); papersBuiltKey.clear();
   pageStateReset();
   mapsFromProject();
+  writerFromProject();
   afterMapChanged();
+  if (workspace == WS_BIBLIOGRAPHY && !writerOpen && !readerOpen) { lastBibliographyRoute = BR_PAPERS; page = PG_READ; papersOpen = true; settings.j.set("workspaceBibliographyRoute", int(lastBibliographyRoute)); }
   ui.toast("Project opened", fileName(path) + " · " + plural(long(P->corpus.recs.size()), "record") + " · " + plural(P->net.n(), "item"), 1, 4);
   livingValid = false; livingRecs.clear(); living = Placement();
   livingOnOpen();  // 1.8: check the saved search for new papers when the project asks for it
@@ -1008,17 +1953,32 @@ void App::cmdOpenProject(const string& path0) {
 
 void App::cmdNewProject() {
   if (busy()) return;
-  if (P->dirty && hasMap() && !scriptMode) {
+  if (P->dirty && (hasMap() || hasCorpus() || !wdoc.empty() || P->library.hasData()) && !scriptMode) {
     int r = MessageBoxW(hwnd, L"Discard the current project?", L"VOSStudio", MB_OKCANCEL | MB_ICONQUESTION);
     if (r != IDOK) return;
   }
+  newProjectNow();
+}
+
+void App::newProjectNow() {
+  closeDoc();
+  papersOpen = false;
+  mainChartOpen = false;
+  figZoomOpen = false;
+  writerReset();
+  readerProjectChanged();
   P = std::make_unique<Project>();
   P->style.darkTheme = ui.dark;
   undoStack.clear(); redoStack.clear();
+  papersStatusFilter = papersPdfFilter = -1;
+  papersCollectionFilter.clear(); papersTagFilter.clear(); papersFilter.clear();
+  papersNewCollectionOpen = papersNewViewOpen = false;
+  papersNewCollectionName.clear(); papersNewViewName.clear(); papersNewTagName.clear(); papersBuiltKey.clear();
   pageStateReset();
   afterMapChanged();
   welcome = true;
-  page = PG_DATA;
+  if (workspace == WS_BIBLIOGRAPHY) { lastBibliographyRoute = BR_PAPERS; page = PG_NONE; papersOpen = true; settings.j.set("workspaceBibliographyRoute", int(lastBibliographyRoute)); }
+  else { lastVisualizationPage = PG_DATA; page = PG_DATA; }
 }
 
 string App::exportName(const string& ext) const {
@@ -1029,6 +1989,22 @@ string App::exportName(const string& ext) const {
 }
 
 // ------------------------------------------------------------------ exports
+namespace {
+bool hybridizeForExport(Gfx& gfx, const FigureSpec& spec, Scene& scene, string* err) {
+  if (!spec.hybridExport) return true;
+  Scene hybrid;
+  if (!makeHybridScene(gfx, scene, spec.dpi, hybrid, err)) return false;
+  scene = std::move(hybrid);
+  return true;
+}
+
+bool hybridizeForExport(Gfx& gfx, const FigureSpec& spec, vector<Scene>& scenes, string* err) {
+  if (!spec.hybridExport) return true;
+  for (Scene& scene : scenes) if (!hybridizeForExport(gfx, spec, scene, err)) return false;
+  return true;
+}
+}  // namespace
+
 void App::cmdExportFigure(const string& fmt, const string& path0) {
   if (!hasMap()) { ui.toast("No map", "Build a map first.", 2); return; }
   string path = path0;
@@ -1044,13 +2020,17 @@ void App::cmdExportFigure(const string& fmt, const string& path0) {
   string err;
   string title = P->fig.title.empty() ? "VOSStudio figure" : P->fig.title;
   int nPages = 1;
-  if (fmt == "svg") ok = writeFileU(path, toSVG(sc, P->fig.serif));
+  if (fmt == "svg") {
+    ok = hybridizeForExport(g, P->fig, sc, &err) && writeFileU(path, toSVG(sc, P->fig.serif));
+  }
   else if (fmt == "pdf" && P->fig.pdfPages && figurePanels(P->fig).size() > 1) {
     auto pages = buildFigurePages(P->net, st, P->fig, &P->bundles, P->methodsShort(), &panelDefs);
     nPages = int(pages.size());
-    ok = writeFileU(path, toPDF(pages, title));
+    ok = hybridizeForExport(g, P->fig, pages, &err) && writeFileU(path, toPDF(pages, title));
   }
-  else if (fmt == "pdf") ok = writeFileU(path, toPDF(sc, title));
+  else if (fmt == "pdf") {
+    ok = hybridizeForExport(g, P->fig, sc, &err) && writeFileU(path, toPDF(sc, title));
+  }
   else ok = exportScenePNG(g, sc, P->fig.dpi, path, &err, P->fig.transparent);
   if (!ok) { ui.toast("Export failed", err.empty() ? "Could not write " + path : err, 3); return; }
   if (!scriptMode) ui.toast("Figure exported", fileName(path) + (nPages > 1 ? " · " + std::to_string(nPages) + " pages" : "") + " · " + fmtNum(P->fig.wmm, 0) + "×" + fmtNum(P->fig.hmm, 0) + " mm" + (sc.warnings.empty() ? "" : " · " + plural(long(sc.warnings.size()), "warning")), 1, 4);
@@ -1263,8 +2243,8 @@ void App::doViewExport() {
   Scene sc = captureView(fmt == "png");
   bool ok = false;
   string err;
-  if (fmt == "svg") ok = writeFileU(path, toSVG(sc, P->fig.serif));
-  else if (fmt == "pdf") ok = writeFileU(path, toPDF(sc, "VOSStudio view"));
+  if (fmt == "svg") ok = hybridizeForExport(g, P->fig, sc, &err) && writeFileU(path, toSVG(sc, P->fig.serif));
+  else if (fmt == "pdf") ok = hybridizeForExport(g, P->fig, sc, &err) && writeFileU(path, toPDF(sc, "VOSStudio view"));
   else ok = exportScenePNG(g, sc, 192 * ui.s, path, &err, P->fig.transparent);
   viewGrab.clear();
   viewGrabW = viewGrabH = 0;
@@ -1296,8 +2276,8 @@ void App::cmdExportChart(const ChartDef& def, const string& fmt) {
   Scene sc = def.make(500, 320, chartTheme(true));
   bool ok = false;
   string err;
-  if (fmt == "svg") ok = writeFileU(path, toSVG(sc));
-  else if (fmt == "pdf") ok = writeFileU(path, toPDF(sc, def.title));
+  if (fmt == "svg") ok = hybridizeForExport(g, P->fig, sc, &err) && writeFileU(path, toSVG(sc));
+  else if (fmt == "pdf") ok = hybridizeForExport(g, P->fig, sc, &err) && writeFileU(path, toPDF(sc, def.title));
   else ok = exportScenePNG(g, sc, 300, path, &err, P->fig.transparent);
   if (ok) ui.toast("Chart exported", fileName(path), 1);
   else ui.toast("Export failed", err, 3);
@@ -1316,8 +2296,10 @@ void App::cmdExportChartsPdf(const vector<ChartDef>& defs0, const string& path0)
   vector<Scene> pages;
   ChartTheme t = chartTheme(true);
   for (auto& d : defs) pages.push_back(d.make(500, 320, t));
-  if (writeFileU(path, toPDF(pages, "VOSStudio charts"))) { if (!scriptMode) ui.toast("Charts exported", fileName(path) + " · " + plural(long(pages.size()), "page"), 1); }
-  else ui.toast("Export failed", "Could not write " + fileName(path), 3);
+  string err;
+  bool ok = hybridizeForExport(g, P->fig, pages, &err) && writeFileU(path, toPDF(pages, "VOSStudio charts"));
+  if (ok) { if (!scriptMode) ui.toast("Charts exported", fileName(path) + " · " + plural(long(pages.size()), "page"), 1); }
+  else ui.toast("Export failed", err.empty() ? "Could not write " + fileName(path) : err, 3);
 }
 
 void App::cmdLoadVosviewer() {
@@ -1682,6 +2664,10 @@ void App::cmdExportRecords(bool lastFetch, const string& fmt) {
     path = saveFileDialog(hwnd, "Export records (RIS)", {{"RIS", "*.ris"}}, base + ".ris", "ris");
     if (path.empty()) return;
     body = writeRecords(recs, RecordExport::RIS);
+  } else if (fmt == "bib") {
+    path = saveFileDialog(hwnd, "Export records (BibTeX)", {{"BibTeX", "*.bib"}}, base + ".bib", "bib");
+    if (path.empty()) return;
+    body = writeRecords(recs, RecordExport::BibTeX);
   } else {
     path = saveFileDialog(hwnd, "Export records (CSV)", {{"CSV (Scopus columns)", "*.csv"}}, base + ".csv", "csv");
     if (path.empty()) return;
@@ -1758,17 +2744,26 @@ void App::setView(ViewKind v, bool animate) {
   geoFitBounds(v);
   if (v != ViewKind::Geo) geoSel = -1;
   mainChartOpen = false;
+  papersOpen = false;  // choosing a map view shows the map
   ViewKind old = view;
   view = v;
   nv.kind = v;
+  if (old != v) nv.visibilityChanged();
   if (v == ViewKind::ThreeD && !pos3dValid) start3DLayout();
-  if (v == ViewKind::Matrix) return;
+  if (v == ViewKind::Matrix) { animT0 = -1; camTargetZoom = -1; return; }
   auto target = targetPositions(v);
   bool geoSwitch = (old == ViewKind::Geo) != (v == ViewKind::Geo);
+  bool samePositions = nv.pos.size() == target.size();
+  if (samePositions) {
+    for (size_t i = 0; i < target.size() && samePositions; i++)
+      for (int d = 0; d < 3; d++) if (nv.pos[i][d] != target[i][d]) { samePositions = false; break; }
+  }
   if (animate && nv.pos.size() == target.size() && old != ViewKind::Matrix) {
-    animFrom = nv.pos;
-    animTo = target;
-    animT0 = nowSeconds();
+    if (!samePositions) {
+      animFrom = nv.pos;
+      animTo = target;
+      animT0 = nowSeconds();
+    } else animT0 = -1;  // camera can still glide, but don't animate/invalidate unchanged positions
     // camera: fit the destination layout and glide there
     auto save = nv.pos;
     nv.pos = target;
@@ -1781,17 +2776,44 @@ void App::setView(ViewKind v, bool animate) {
     else { camTargetZoom = c1.zoom; camTargetX = c1.x; camTargetY = c1.y; }
     if (geoSwitch) { nv.cam = c1; camTargetZoom = -1; }
   } else {
+    animT0 = -1;  // cancel an earlier transition when this target already matches or animation was disabled
     nv.pos = target;
     nv.fit();
     camTargetZoom = -1;
   }
+  nv.positionsChanged();
   nv.nodesDirty = nv.linksDirty = true;
 }
 
-void App::updateFlags() {
+// The flags of a view depend on selection/search/pin/filter revisions, the hovered item and the active view.
+// Map-sized node content changes invalidate explicitly (map rebuild, recluster, pin edit or geo-index rebuild).
+void App::invalidateFlags() const {
+  ++flagsInputVersion_;
+  flagsSig_ = 0;
+}
+
+uint64_t App::flagsSignature(ViewKind vk, int hoverIdx) const {
+  const Network& N = P->net;
+  int gm = vk == ViewKind::Geo ? geoMode() : 0;  // geoUpdate may bump the input revision
+  SigHash h;
+  h.v(reinterpret_cast<uintptr_t>(P.get())); h.v(N.n()); h.v(N.links.size());
+  h.v(reinterpret_cast<uintptr_t>(N.nodes.data())); h.v(reinterpret_cast<uintptr_t>(N.links.data())); h.v(N.nClusters);
+  h.v(hoverIdx); h.v(clusterFilter); h.v(int(vk)); h.v(flagsInputVersion_);
+  h.v(selection.size()); h.v(reinterpret_cast<uintptr_t>(selection.data()));
+  h.v(searchHits.size()); h.v(reinterpret_cast<uintptr_t>(searchHits.data()));
+  h.v(gm); h.v(reinterpret_cast<uintptr_t>(geoNodeCountry.data())); h.v(geoNodeCountry.size());
+  if (vk == ViewKind::Timeline) {
+    int si = N.scoreIndex("Avg. pub. year");
+    if (si < 0) si = N.scoreIdx;
+    h.v(si);
+  }
+  return h.h ? h.h : 1;
+}
+
+void App::computeFlags(ViewKind vk, int hoverIdx, vector<uint32_t>& f) const {
   const Network& N = P->net;
   size_t n = size_t(N.n());
-  vector<uint32_t> f(n, 0);
+  f.assign(n, 0);
   std::unordered_set<int> sel(selection.begin(), selection.end());
   std::unordered_set<int> nb;
   if (!sel.empty())
@@ -1801,13 +2823,13 @@ void App::updateFlags() {
     }
   std::unordered_set<int> hits(searchHits.begin(), searchHits.end());
   int si = N.scoreIndex("Avg. pub. year");
-  int gmode = view == ViewKind::Geo ? geoMode() : 0;
+  int gmode = vk == ViewKind::Geo ? geoMode() : 0;
   if (si < 0) si = N.scoreIdx;
   for (size_t i = 0; i < n; i++) {
     uint32_t x = 0;
     if (sel.count(int(i))) x |= NF_SELECTED;
     else if (nb.count(int(i))) x |= NF_NEIGHBOUR;
-    if (int(i) == hover) x |= NF_HOVER;
+    if (int(i) == hoverIdx) x |= NF_HOVER;
     if (hits.count(int(i))) x |= NF_MATCH;
     if (N.nodes[i].pinned) x |= NF_PINNED;
     bool dim = false;
@@ -1816,23 +2838,42 @@ void App::updateFlags() {
     if (!hits.empty() && sel.empty() && !(x & NF_MATCH)) dim = true;
     if (dim) x |= NF_DIM;
     if (gmode == 2 || (gmode == 1 && (i >= geoNodeCountry.size() || geoNodeCountry[i] < 0))) x |= NF_HIDDEN;
-    if (view == ViewKind::Timeline && !(si >= 0 && size_t(si) < N.nodes[i].sc.size() && std::isfinite(N.nodes[i].sc[size_t(si)]))) x |= NF_HIDDEN;
+    if (vk == ViewKind::Timeline && !(si >= 0 && size_t(si) < N.nodes[i].sc.size() && std::isfinite(N.nodes[i].sc[size_t(si)]))) x |= NF_HIDDEN;
     f[i] = x;
   }
-  if (f != nv.flags) { nv.flags.swap(f); nv.nodesDirty = nv.linksDirty = true; }
+}
+
+void App::updateFlags() {
+  const size_t n = size_t(P->net.n());
+  const int hv = hover >= 0 ? hover : liveHover();
+  uint64_t h = flagsSignature(view, hv);
+  if (h == flagsSig_ && nv.flags.size() == n) return;  // nothing that feeds the flags changed (this runs every frame)
+  flagsSig_ = h;
+  vector<uint32_t> f;
+  computeFlags(view, hv, f);
+  if (f != nv.flags) {
+    if (view == ViewKind::Geo || view == ViewKind::Timeline) nv.visibilityChanged();
+    nv.flags.swap(f); nv.nodesDirty = nv.linksDirty = true;
+  }
 }
 
 void App::selectNode(int i, bool add) {
   if (i < 0) return;
+  bool changed = false;
   if (add) {
     auto it = std::find(selection.begin(), selection.end(), i);
-    if (it != selection.end()) selection.erase(it); else selection.push_back(i);
-  } else selection = {i};
+    if (it != selection.end()) { selection.erase(it); changed = true; }
+    else { selection.push_back(i); changed = true; }
+  } else if (selection.size() != 1 || selection[0] != i) { selection = {i}; changed = true; }
+  if (changed) invalidateFlags();
   if (!inspectorOpen) inspectorOpen = true;
   closeDoc();  // a node selection replaces an open document preview
 }
 
-void App::clearSelection() { selection.clear(); closeDoc(); }
+void App::clearSelection() {
+  if (!selection.empty()) { selection.clear(); invalidateFlags(); }
+  closeDoc();
+}
 
 void App::focusOn(int i) {
   if (!hasMap() || i < 0 || i >= P->net.n()) return;
@@ -1858,8 +2899,222 @@ void App::focusCluster(int c) {
   camTargetZoom = clampv(std::min((canvasR.w - 220 * ui.s) / std::max(1.0, x1 - x0), (canvasR.h - 160 * ui.s) / std::max(1.0, y1 - y0)), nv.fitZoom() * 0.8, nv.fitZoom() * 8);
 }
 
+// =====================================================================================
+// linked selection: the highlighted cluster / selected items scope the analyses
+// =====================================================================================
+bool App::scopeActive() {
+  auto drop = [&]() {
+    if (scopeKey_.empty() && scopeRecs_.empty()) return;
+    scopeKey_.clear(); scopeRecs_.clear(); scopeLabel_.clear(); scopeC_ = Corpus();
+    scopeVer_++;
+    scopeChanged();
+  };
+  if (!linkScope || !P || !hasMap() || !hasCorpus() || (clusterFilter < 0 && selection.empty())) { drop(); return false; }
+  string key = std::to_string(reinterpret_cast<uintptr_t>(P.get())) + "|" + std::to_string(P->corpusVersion) + "|" + P->builtSig + "|" + std::to_string(P->net.n()) + "|c" + std::to_string(clusterFilter);
+  if (clusterFilter < 0) { key += "|s"; for (int i : selection) key += "," + std::to_string(i); }
+  if (key == scopeKey_) return !scopeRecs_.empty();
+  scopeKey_ = key;
+  scopeRecs_.clear();
+  scopeLabel_.clear();
+  scopeC_ = Corpus();
+  const Network& N = P->net;
+  size_t total = P->corpus.recs.size();
+  vector<char> mark(total, 0);
+  bool anyLinks = false;
+  if (clusterFilter >= 0) {
+    for (auto& nd : N.nodes) {
+      if (nd.cluster != clusterFilter) continue;
+      if (!nd.recs.empty()) anyLinks = true;
+      for (int r : nd.recs) if (r >= 0 && size_t(r) < total) mark[size_t(r)] = 1;
+    }
+    string nm = N.clusterName(clusterFilter);
+    scopeLabel_ = "Cluster " + std::to_string(clusterFilter + 1) + (nm.empty() || startsWith(lower(nm), "cluster ") ? string() : ": " + nm);
+  } else {
+    for (int i : selection) {
+      if (i < 0 || i >= N.n()) continue;
+      if (!N.nodes[size_t(i)].recs.empty()) anyLinks = true;
+      for (int r : N.nodes[size_t(i)].recs) if (r >= 0 && size_t(r) < total) mark[size_t(r)] = 1;
+    }
+    scopeLabel_ = selection.size() == 1 && selection[0] >= 0 && selection[0] < N.n() ? "\xE2\x80\x9C" + N.nodes[size_t(selection[0])].label + "\xE2\x80\x9D" : plural(long(selection.size()), "selected item");
+  }
+  for (size_t r = 0; r < total; r++) if (mark[r]) scopeRecs_.push_back(int(r));
+  if (!anyLinks || scopeRecs_.empty() || scopeRecs_.size() == total) {
+    // nothing to narrow (no record links, or the scope covers everything): the pages show the whole corpus
+    if (!anyLinks) scopeLabel_ += " (this map has no record links)";
+    scopeRecs_.clear();
+  } else {
+    scopeC_.files = P->corpus.files;
+    scopeC_.format = P->corpus.format;
+    scopeC_.recs.reserve(scopeRecs_.size());
+    for (int r : scopeRecs_) scopeC_.recs.push_back(P->corpus.recs[size_t(r)]);
+  }
+  scopeVer_++;
+  scopeChanged();
+  return !scopeRecs_.empty();
+}
+
+void App::scopeChanged() {
+  burstsValid = evoValid = cmpValid = tfValid = collabValid = rpValid = ttValid = false;
+  actorsUnit = -1;
+  prodUnit = -1;
+  papersBuiltKey.clear();
+  needFrame = true;
+}
+
+void App::clearScope() {
+  clusterFilter = -1;
+  if (!selection.empty()) clearSelection();
+  needFrame = true;
+}
+
+void App::drawScopeBanner(Lay& L) {
+  float s = ui.s;
+  bool any = hasMap() && (clusterFilter >= 0 || !selection.empty());
+  if (!any || !hasCorpus()) return;
+  bool active = scopeActive();
+  Rect r = L.row(30 * s);
+  Color c = active ? ui.c.accent : ui.c.textDim;
+  ui.fill(r, c.withA(active ? 0.10f : 0.06f), 7 * s);
+  ui.stroke(r, c.withA(0.35f), 7 * s);
+  ui.icon("link", r.x + 16 * s, r.y + r.h / 2, 14 * s, c);
+  string txt;
+  if (!linkScope) txt = "Linked selection is off";
+  else if (active) txt = scopeLabel_ + " \xC2\xB7 " + fmtInt(long(scopeRecs_.size())) + " of " + fmtInt(long(P->corpus.recs.size())) + " records";
+  else txt = scopeLabel_.empty() ? string("Selection covers all records") : scopeLabel_ + " \xC2\xB7 all records";
+  float bw = 56 * s;
+  ui.pushId("scopebar");
+  if (ui.button({r.r() - bw - 4 * s, r.y + 4 * s, bw, r.h - 8 * s}, linkScope ? "Unlink" : "Link", BTN_GHOST)) {
+    linkScope = !linkScope;
+    settings.j.set("linkScope", linkScope);
+    settings.save();
+    scopeActive();
+  }
+  ui.tip(linkScope ? "Stop scoping the charts, papers and geo view to the selection (setting)" : "Scope the charts, papers and geo view to the highlighted cluster or selected items");
+  if (ui.button({r.r() - 2 * bw - 8 * s, r.y + 4 * s, bw, r.h - 8 * s}, "Clear", BTN_GHOST)) clearScope();
+  ui.tip("Clear the cluster highlight and the selection");
+  ui.popId();
+  ui.text({r.x + 30 * s, r.y, r.w - 2 * bw - 42 * s, r.h}, txt, 11.5f * s, active ? ui.c.text : ui.c.textDim, AL_LEFT, active ? 600 : 400);
+  L.space(4 * s);
+}
+
+// =====================================================================================
+// compare mode: periods, source files or thresholds; side by side or as a difference map
+// =====================================================================================
+bool App::compareMasks(vector<char>& inA, vector<char>& inB, string& titleA, string& titleB, string* err) {
+  if (!hasCorpus()) { if (err) *err = "Import records first."; return false; }
+  const Corpus& C = P->corpus;
+  auto per = [](int x, int y) { return x == y ? std::to_string(x) : std::to_string(x) + "\xE2\x80\x93" + std::to_string(y); };
+  if (cmpKind == 1) {
+    if (C.files.size() < 2) { if (err) *err = "Comparing sources needs at least two imported files."; return false; }
+    if (!C.provenanceKnown()) { if (err) *err = "This project does not record which file each record came from (import the files again)."; return false; }
+    cmpFileA = clampv(cmpFileA, 0, int(C.files.size()) - 1);
+    cmpFileB = clampv(cmpFileB, 0, int(C.files.size()) - 1);
+    if (cmpFileA == cmpFileB) { if (err) *err = "Choose two different files."; return false; }
+    inA = fileMask(C, size_t(cmpFileA));
+    inB = fileMask(C, size_t(cmpFileB));
+    titleA = "A: " + fileName(C.files[size_t(cmpFileA)].name);
+    titleB = "B: " + fileName(C.files[size_t(cmpFileB)].name);
+    return true;
+  }
+  if (!cmpA0) suggestPeriods(C, cmpA0, cmpA1, cmpB0, cmpB1);
+  inA = yearMask(C, cmpA0, cmpA1);
+  inB = yearMask(C, cmpB0, cmpB1);
+  titleA = "A: " + per(std::min(cmpA0, cmpA1), std::max(cmpA0, cmpA1));
+  titleB = "B: " + per(std::min(cmpB0, cmpB1), std::max(cmpB0, cmpB1));
+  return true;
+}
+
+bool App::compareSides(vector<double>& a, vector<double>& b, double& nA, double& nB, string& titleA, string& titleB, string* err) {
+  if (!hasMap()) { if (err) *err = "Build a map first."; return false; }
+  const Network& N = P->net;
+  a.assign(size_t(N.n()), 0);
+  b.assign(size_t(N.n()), 0);
+  if (cmpKind == 2) {
+    double lo = 1e18;
+    for (int i = 0; i < N.n(); i++) lo = std::min(lo, N.weight(i));
+    double tA = cmpThA > 0 ? cmpThA : lo, tB = cmpThB > 0 ? cmpThB : lo;
+    int kA = 0, kB = 0;
+    for (int i = 0; i < N.n(); i++) {
+      double w = N.weight(i);
+      if (w >= tA) { a[size_t(i)] = w; kA++; }
+      if (w >= tB) { b[size_t(i)] = w; kB++; }
+    }
+    if (!kA || !kB) { if (err) *err = "No item reaches one of the thresholds."; return false; }
+    nA = nB = 0;
+    string wn = N.weightIdx >= 0 && N.weightIdx < int(N.weightNames.size()) ? lower(N.weightNames[size_t(N.weightIdx)]) : string("weight");
+    titleA = "A: " + wn + " \xE2\x89\xA5 " + fmtNum(tA, tA == std::floor(tA) ? 0 : 1) + " \xC2\xB7 " + plural(kA, "item");
+    titleB = "B: " + wn + " \xE2\x89\xA5 " + fmtNum(tB, tB == std::floor(tB) ? 0 : 1) + " \xC2\xB7 " + plural(kB, "item");
+    return true;
+  }
+  vector<char> inA, inB;
+  if (!compareMasks(inA, inB, titleA, titleB, err)) return false;
+  PeriodDiff d = subsetDiff(N, P->corpus, inA, inB);
+  if (!d.ok) { if (err) *err = d.error; return false; }
+  for (size_t i = 0; i < d.items.size() && i < a.size(); i++) { a[i] = d.items[i].a; b[i] = d.items[i].b; }
+  nA = d.nA;
+  nB = d.nB;
+  titleA += " \xC2\xB7 " + plural(d.nA, "document");
+  titleB += " \xC2\xB7 " + plural(d.nB, "document");
+  return true;
+}
+
+Scene App::compareScene(double w, double h, const ChartTheme* th) {
+  vector<double> a, b;
+  double nA = 0, nB = 0;
+  string ta, tb, err;
+  if (!compareSides(a, b, nA, nB, ta, tb, &err)) {
+    Scene sc;
+    sc.W = w; sc.H = h;
+    Prim p;
+    p.type = Prim::Text; p.text = err; p.size = 12; p.x = float(w / 2); p.y = float(h / 2); p.anchor = 1; p.fillC = th ? th->fg : Color(0.3f, 0.3f, 0.3f, 1); p.fill = true;
+    sc.items.push_back(p);
+    return sc;
+  }
+  FigureSpec sp = P->fig;
+  sp.theme = th && !th->light ? FigTheme::Slide : FigTheme::Print;
+  sp.title.clear();
+  return compareSideBySide(P->net, P->style, sp, &P->bundles, P->methodsShort(), a, b, nA, nB, ta, tb, w, h);
+}
+
+string App::compareSummary() {
+  vector<double> a, b;
+  double nA = 0, nB = 0;
+  string ta, tb, err;
+  if (!compareSides(a, b, nA, nB, ta, tb, &err)) return err;
+  int onlyA = 0, onlyB = 0, both = 0;
+  for (size_t i = 0; i < a.size(); i++) { if (a[i] > 0 && b[i] > 0) both++; else if (a[i] > 0) onlyA++; else if (b[i] > 0) onlyB++; }
+  return ta + " | " + tb + ": " + std::to_string(both) + " items on both sides, " + std::to_string(onlyA) + " only in A, " + std::to_string(onlyB) + " only in B";
+}
+
+bool App::compareShowSideBySide(string* err) {
+  vector<double> a, b;
+  double nA = 0, nB = 0;
+  string ta, tb;
+  if (!compareSides(a, b, nA, nB, ta, tb, err)) return false;
+  ChartDef def;
+  def.title = "Compare \xC2\xB7 " + ta + " vs " + tb;
+  def.make = [this](double w, double h, const ChartTheme& t) { return compareScene(w, h, &t); };
+  mainChart = def;
+  mainChartOpen = true;
+  cmpSideOpen = true;
+  mainChartSummary = "a side-by-side comparison of the map (" + compareSummary() + ")";
+  papersOpen = false;
+  figZoomOpen = false;
+  chartCache.erase("#main|" + mainChart.title);
+  needFrame = true;
+  return true;
+}
+
+void App::compareClose() {
+  if (!cmpSideOpen) return;
+  cmpSideOpen = false;
+  if (mainChartOpen && startsWith(mainChart.title, "Compare \xC2\xB7 ")) { mainChartOpen = false; mainChart = ChartDef(); mainChartSummary.clear(); }
+  needFrame = true;
+}
+
 void App::runSearch() {
   searchHits.clear();
+  invalidateFlags();
   searchIdx = 0;
   string q = trim(search);
   if (q.empty() || !hasMap()) return;
@@ -1923,22 +3178,72 @@ void App::drawTopBar() {
   // left: file menu, save, undo/redo, map switcher (the product name lives in the window title)
   float brandR = 0;
   drawTopLeft(brandR);
-  // view switcher (centre) — full labels when there is room, icon-only otherwise
-  float rightBlock = 3 * 34 * s + 14 * s + 190 * s + captionW();  // icon buttons + gaps + search (min)
-  float avail = topR.w - brandR - rightBlock - 16 * s;
+  // Network views and node search belong to Visualization; Bibliography keeps its own paper-library navigation.
+  const bool visualizationWorkspace = workspace == WS_VISUALIZATION;
+  const float searchFull = 190 * s, searchMin = 100 * s;
+  const float chipW = visualizationWorkspace ? clampv(topR.w * 0.15f, (topR.w < 1150 * s ? 120 : 150) * s, 240 * s) : 0;
+  Rect seg{0, topR.y + 11 * s, 0, 30 * s};
+  if (visualizationWorkspace) {
+    float rightFull = 6 * 34 * s + 14 * s + searchFull + 8 * s + chipW + captionW() + 6 * s;
+    float rightMin = 6 * 34 * s + 14 * s + searchMin + 8 * s + chipW + captionW() + 6 * s;
   vector<float> ws;
-  float segW = 0;
-  for (auto& vd : kViews) { float w = ui.textW(vd.label, 12.5f * s, 600) + 42 * s; ws.push_back(w); segW += w; }
+  float segFull = 0;
+  for (auto& vd : kViews) { float w = ui.textW(vd.label, 12.5f * s, 600) + 42 * s; ws.push_back(w); segFull += w; }
+  const float segIcons = 7 * 38 * s, segDrop = 46 * s;
   // centred on the window (not the canvas), so opening or closing a side panel never moves it;
   // full labels only when they fit centred between the left tools and the right-hand block
-  float mid = topR.w / 2, half = std::min(mid - brandR, mid - rightBlock) - 12 * s;
-  bool compact = segW / 2 + 2 * s > half;
-  if (compact) { segW = 0; for (auto& w : ws) { w = 38 * s; segW += w; } }
-  float cx = clampv(std::round(mid - (segW + 4 * s) / 2), brandR + 8 * s, std::max(brandR + 8 * s, brandR + avail - segW - 8 * s));
-  Rect seg{cx, topR.y + 11 * s, segW + 4 * s, 30 * s};
+  float mid = topR.w / 2;
+  auto halfFor = [&](float right) { return std::min(mid - brandR, mid - right) - 12 * s; };
+  int segMode = 0;  // 0 labels, 1 icons, 2 drop-down
+  if (segFull / 2 + 2 * s <= halfFor(rightFull)) segMode = 0;
+  else if (segIcons / 2 + 2 * s <= halfFor(rightMin)) segMode = 1;
+  else if (brandR + 8 * s + segIcons + 4 * s + 8 * s <= topR.w - rightMin) segMode = 1;  // icons, left of centre
+  else segMode = 2;
+  bool compact = segMode == 1;
+  float segW = segMode == 0 ? segFull : segMode == 1 ? segIcons : segDrop;
+  if (compact) for (auto& w : ws) w = 38 * s;
+  float right = segMode == 0 ? rightFull : rightMin;
+  float cx = clampv(std::round(mid - (segW + 4 * s) / 2), brandR + 8 * s, std::max(brandR + 8 * s, topR.w - right - segW - 4 * s - 8 * s));
+  seg = {cx, topR.y + 11 * s, segW + 4 * s, 30 * s};
   ui.fill(seg, ui.dark ? Color(1, 1, 1, 0.07f) : Color(0, 0, 0, 0.055f), 7 * s);
+  if (segMode == 2) {  // one button: the current view's icon and a chevron; the seven views in a menu
+    int cur = 0;
+    for (int i = 0; i < 7; i++) if (kViews[i].v == view) cur = i;
+    Rect r{seg.x + 2 * s, seg.y + 2 * s, segDrop, seg.h - 4 * s};
+    uint64_t idv = ui.id("view:menu");
+    bool hov = false;
+    bool open = ui.isPopupOpen("views");
+    if (ui.behave(idv, r, &hov) && hasMap()) { if (open) ui.closePopup(); else ui.openPopup("views"); }
+    if (hov || open) ui.fill(r, ui.c.hover, 5.5f * s);
+    Color fg = hasMap() ? ui.c.text : ui.c.textFaint;
+    ui.icon(kViews[cur].icon, r.x + 15 * s, r.y + r.h / 2, 16 * s, hasMap() ? ui.c.accent : fg, 1.7f);
+    ui.icon("chev-down", r.x + 33 * s, r.y + r.h / 2 + 1 * s, 11 * s, ui.c.textFaint, 2.f);
+    ui.tipFor(idv, string(kViews[cur].label) + " view \xE2\x80\x94 click for the other views  (1\xE2\x80\x93" "7)");
+    if (open && hasMap()) {
+      ui.overlay([this, r, s]() {
+        float rowH = 32 * s;
+        Rect pr{r.x, r.b() + 6 * s, 230 * s, 8 * s + 7 * rowH};
+        ui.shadow(pr, 8 * s);
+        ui.fill(pr, ui.c.panel2, 8 * s);
+        ui.stroke(pr, ui.c.border, 8 * s);
+        ui.popupRect(pr);
+        float yy = pr.y + 4 * s;
+        for (int i = 0; i < 7; i++) {
+          Rect rr{pr.x + 4 * s, yy, pr.w - 8 * s, rowH - 2 * s};
+          bool selv = view == kViews[i].v;
+          bool enabled = kViews[i].v != ViewKind::Geo || geoAvailable();
+          if (ui.listRow(rr, string("vm") + std::to_string(i), selv) && enabled) { ui.closePopup(); setView(kViews[i].v); return; }
+          Color fg2 = enabled ? ui.c.text : ui.c.textFaint;
+          ui.icon(kViews[i].icon, rr.x + 16 * s, rr.y + rr.h / 2, 15 * s, selv ? ui.c.accent : (enabled ? ui.c.textDim : ui.c.textFaint), 1.6f);
+          ui.text({rr.x + 34 * s, rr.y, rr.w - 70 * s, rr.h}, string(kViews[i].label) + (enabled ? "" : "  (needs countries)"), 12.5f * s, fg2, AL_LEFT, selv ? 600 : 400);
+          ui.text({rr.r() - 34 * s, rr.y, 26 * s, rr.h}, std::to_string(i + 1), 11 * s, ui.c.textFaint, AL_RIGHT);
+          yy += rowH;
+        }
+      });
+    }
+  }
   float x = seg.x + 2 * s;
-  for (int i = 0; i < 7; i++) {
+  for (int i = 0; segMode < 2 && i < 7; i++) {
     Rect r{x, seg.y + 2 * s, ws[size_t(i)], seg.h - 4 * s};
     bool selv = view == kViews[i].v && hasMap();
     bool hov = false;
@@ -1959,18 +3264,47 @@ void App::drawTopBar() {
     if (clicked) setView(kViews[i].v);
     x += ws[size_t(i)];
   }
-  // right: search + actions
+  } else {
+    string route = lastBibliographyRoute == BR_PAPERS ? "Papers" : lastBibliographyRoute == BR_REVIEW ? "Review" : "Write";
+    float labelW = topR.w - brandR - 240 * s;
+    if (labelW > 60 * s) ui.text({brandR + 12 * s, topR.y + 8 * s, std::min(180 * s, labelW), 34 * s}, "Bibliography · " + route, 12.5f * s, ui.c.textDim, AL_LEFT, 550);
+  }
+  // right: actions shared by both workspaces; map search/view controls are only drawn in Visualization
   float rx = topR.w - 6 * s - captionW();
   auto ib = [&](const string& icon, const string& tip, bool toggled, bool enabled) {
     rx -= 34 * s;
     return ui.iconButton({rx, topR.y + 12 * s, 30 * s, 28 * s}, icon, tip, toggled, enabled);
   };
-  if (ib("layers", "Inspector  (I)", inspectorOpen && canInspect(), canInspect())) inspectorOpen = !inspectorOpen;
-  if (ib(ui.dark ? "sun" : "moon", ui.dark ? "Light theme" : "Dark theme", false, true)) setTheme(!ui.dark);
+  if (visualizationWorkspace && ib("layers", "Inspector  (I)", inspectorOpen && canInspect(), canInspect())) inspectorOpen = !inspectorOpen;
+  string papersTip = workspace == WS_BIBLIOGRAPHY ? (papersOpen ? "Return to Bibliography home  (Ctrl+T)" : "Open the papers library  (Ctrl+T)")
+                                                    : (papersOpen ? "Return to Visualization  (Ctrl+T)" : "Open the papers library  (Ctrl+T)");
+  if (ib("table", papersTip, papersOpen, hasCorpus() || workspace == WS_BIBLIOGRAPHY)) {
+    if (papersOpen) {
+      papersOpen = false;
+      if (workspace == WS_BIBLIOGRAPHY) { lastBibliographyRoute = BR_REVIEW; papersStatusFilter = -1; papersPdfFilter = 1; papersBuiltKey.clear(); page = PG_READ; settings.j.set("workspaceBibliographyRoute", int(lastBibliographyRoute)); }
+    } else openPapers();
+  }
+  if (ib("writer", writerOpen ? "Back to Bibliography  (Esc)" : wdoc.empty() ? "Open the visual-first writer  (Ctrl+Shift+W)" : "Writer: " + writerSummary() + "  (Ctrl+Shift+W)", writerOpen && !readerOpen, true)) { if (writerOpen) closeWriter(); else openWriter(); }
+  if (ib("live", live.open && live.mini ? "Live AI: open the panel again  (Ctrl+Shift+L)" : live.open ? "Close Live AI  (Ctrl+Shift+L)" : "Live AI: talk with the assistant while you work  (Ctrl+Shift+L)", live.open, true)) { if (live.open && live.mini) liveSetMini(false); else if (live.open) liveClose(); else liveOpen(false); }
+  {  // sun / moon: drawn by hand, its icon morphs while the theme reveal runs (see drawThemeButton)
+    rx -= 34 * s;
+    Rect tr{rx, topR.y + 12 * s, 30 * s, 28 * s};
+    uint64_t idv = ui.id("ib:theme");
+    bool hov = false, held = false;
+    bool clicked = ui.behave(idv, tr, &hov, &held);
+    drawThemeButton(tr, hov, held, ui.c);
+    bool targetDark = themeTarget();
+    ui.tipFor(idv, targetDark ? "Light theme" : "Dark theme");
+    themeAnim.btn = tr;
+    themeAnim.btnHover = hov;
+    if (clicked) setTheme(!targetDark);
+  }
   if (ib("command", "Command palette  (Ctrl+K)", paletteOpen, true)) { paletteOpen = !paletteOpen; paletteQuery.clear(); paletteSel = 0; }
+  if (visualizationWorkspace) {
   rx -= 8 * s;
-  float sw = std::min(250 * s, std::max(140 * s, rx - (seg.r() + 16 * s)));
+  float sw = std::min(250 * s, std::max(searchMin, rx - chipW - 8 * s - (seg.r() + 16 * s)));
   Rect sr{rx - sw, topR.y + 12 * s, sw, 28 * s};
+  drawMapChip({sr.x - 8 * s - chipW, topR.y + 10 * s, chipW, 32 * s});
   bool submitted = false;
   string before = search;
   ui.textInput(sr, "search", search, hasMap() ? "Search" : "Search", &submitted, "search");
@@ -2002,34 +3336,114 @@ void App::drawTopBar() {
       }
     });
   }
+  }
 }
 
 void App::drawRail() {
-  float s = ui.s;
+  const float s = ui.s;
+  const bool expanded = railR.w > 100 * s;
   ui.fill(railR, ui.c.rail);
   ui.line(railR.r() - 0.5f, railR.y, railR.r() - 0.5f, railR.b(), ui.c.border);
-  float y = railR.y + 8 * s;
-  for (int p = 0; p < PG_COUNT; p++) {
-    if (p == PG_AI) { ui.line(railR.x + 18 * s, y + 2 * s, railR.r() - 18 * s, y + 2 * s, ui.c.border); y += 8 * s; }
-    Rect r{railR.x + 6 * s, y, railR.w - 12 * s, 54 * s};
-    uint64_t idv = ui.id(string("rail:") + kPageTitles[p]);
+
+  float y = railR.y + 6 * s;
+  Rect head{railR.x + 10 * s, y, railR.w - 20 * s, 22 * s};
+  if (expanded) ui.text(head, "WORKSPACE", 10 * s, ui.c.textFaint, AL_LEFT, 700);
+  Rect modeR{railR.r() - 30 * s, y - 2 * s, 24 * s, 24 * s};
+  uint64_t modeId = ui.id("rail:expand");
+  bool modeHover = false;
+  bool modeClick = ui.behave(modeId, modeR, &modeHover);
+  if (modeHover) ui.fill(modeR, ui.c.hover, 5 * s);
+  ui.icon(railExpanded ? "chev-left" : "chev-right", modeR.x + modeR.w / 2, modeR.y + modeR.h / 2, 13 * s, modeHover ? ui.c.text : ui.c.textDim, 1.8f);
+  ui.tipFor(modeId, railExpanded ? "Collapse navigation" : "Expand navigation when the window is wide enough");
+  if (modeClick) { railExpanded = !railExpanded; settings.j.set("railExpanded", railExpanded); needFrame = true; }
+  y += 24 * s;
+
+  auto workspaceButton = [&](Workspace ws, const string& label, const string& icon, float yy) {
+    Rect r{railR.x + 6 * s, yy, railR.w - 12 * s, 28 * s};
+    uint64_t idv = ui.id(string("rail:workspace:") + std::to_string(int(ws)));
     bool hov = false;
-    if (ui.behave(idv, r, &hov)) setPage(p);
-    bool sel = page == p;
-    if (sel) ui.fill(r, ui.c.active, 8 * s);
-    else if (hov) ui.fill(r, ui.c.hover, 8 * s);
-    Color fg = sel ? ui.c.accent : (hov ? ui.c.text : ui.c.textDim);
-    ui.icon(kPageIcons[p], r.x + r.w / 2, r.y + 20 * s, 19 * s, fg, 1.6f);
-    ui.text({r.x, r.y + 33 * s, r.w, 16 * s}, kPageTitles[p], 10.5f * s, sel ? ui.c.text : fg, AL_CENTER, sel ? 600 : 400);
-    // progress hints: a dot when a step is ready to do
-    bool hint = (p == PG_DATA && !hasCorpus()) || (p == PG_BUILD && hasCorpus() && !hasMap());
-    if (hint) ui.circle(r.r() - 10 * s, r.y + 10 * s, 3 * s, ui.c.accent);
-    ui.tipFor(idv, kPageSubs[p]);
-    y += 58 * s;
+    bool clicked = ui.behave(idv, r, &hov);
+    bool selected = workspace == ws;
+    if (selected) ui.fill(r, ui.c.active, 6 * s);
+    else if (hov) ui.fill(r, ui.c.hover, 6 * s);
+    Color fg = selected ? ui.c.accent : (hov ? ui.c.text : ui.c.textDim);
+    ui.icon(icon, expanded ? r.x + 16 * s : r.x + r.w / 2, r.y + r.h / 2, 15 * s, fg, 1.7f);
+    if (expanded) ui.text({r.x + 31 * s, r.y, r.w - 36 * s, r.h}, label, 12.5f * s, selected ? ui.c.text : fg, AL_LEFT, selected ? 600 : 450);
+    ui.tipFor(idv, string("Switch to the ") + label + " workspace");
+    if (clicked && workspace != ws) setWorkspace(ws);
+  };
+  workspaceButton(WS_VISUALIZATION, "Visualization", "network", y);
+  y += 30 * s;
+  workspaceButton(WS_BIBLIOGRAPHY, "Bibliography", "book", y);
+  y += 34 * s;
+  ui.line(railR.x + 8 * s, y, railR.r() - 8 * s, y, ui.c.border);
+  y += 7 * s;
+
+  if (workspace == WS_BIBLIOGRAPHY) {
+    Rect add{railR.x + 6 * s, y, railR.w - 12 * s, 32 * s};
+    uint64_t addId = ui.id("rail:addpapers");
+    bool hov = false;
+    bool clicked = ui.behave(addId, add, &hov);
+    if (hov) ui.fill(add, ui.c.hover, 6 * s);
+    ui.icon("plus", expanded ? add.x + 16 * s : add.x + add.w / 2, add.y + add.h / 2, 15 * s, hov ? ui.c.accent : ui.c.textDim, 1.8f);
+    if (expanded) ui.text({add.x + 31 * s, add.y, add.w - 36 * s, add.h}, "Add papers", 12.5f * s, hov ? ui.c.text : ui.c.textDim, AL_LEFT, 500);
+    ui.tipFor(addId, "Import bibliographic files or attach PDFs (Ctrl+O)");
+    if (clicked) cmdOpenFiles();
+    y += 36 * s;
   }
-  // bottom buttons
-  Rect hb{railR.x + 14 * s, railR.b() - 46 * s, 36 * s, 36 * s};
-  if (ui.iconButton(hb, "keyboard", "Keyboard shortcuts & commands (F1)")) { paletteOpen = true; paletteQuery.clear(); }
+
+  const RailItem* items = workspace == WS_VISUALIZATION ? kVisualizationNav : kBibliographyNav;
+  const size_t count = workspace == WS_VISUALIZATION ? sizeof(kVisualizationNav) / sizeof(kVisualizationNav[0]) : sizeof(kBibliographyNav) / sizeof(kBibliographyNav[0]);
+  const float bottomH = 78 * s;
+  Rect list{railR.x, y, railR.w, std::max(0.f, railR.b() - bottomH - y)};
+  ui.beginScroll(workspace == WS_VISUALIZATION ? "nav:visualization" : "nav:bibliography", list);
+  float sy = ui.scrollY();
+  float rowH = expanded ? 42 * s : 48 * s;
+  for (size_t i = 0; i < count; i++) {
+    const RailItem& item = items[i];
+    Rect r{railR.x + 6 * s, list.y + 4 * s + float(i) * rowH - sy, railR.w - 12 * s, rowH - 4 * s};
+    uint64_t idv = ui.id(string("rail:item:") + (workspace == WS_VISUALIZATION ? "v:" : "b:") + item.id);
+    bool hov = false;
+    bool clicked = ui.behave(idv, r, &hov);
+    bool selected = false;
+    if (workspace == WS_VISUALIZATION) {
+      selected = item.action == RailAction::Map ? (page == PG_NONE && !papersOpen && !readerOpen && !writerOpen && !mainChartOpen)
+                                                : (item.action == RailAction::Page && page == item.page);
+    } else {
+      selected = (item.action == RailAction::Papers && lastBibliographyRoute == BR_PAPERS) ||
+                 (item.action == RailAction::Review && lastBibliographyRoute == BR_REVIEW) ||
+                 (item.action == RailAction::Write && lastBibliographyRoute == BR_WRITE);
+    }
+    if (selected) ui.fill(r, ui.c.active, 7 * s);
+    else if (hov) ui.fill(r, ui.c.hover, 7 * s);
+    if (selected) ui.fill({r.x, r.y + 7 * s, 3 * s, r.h - 14 * s}, ui.c.accent, 1.5f * s);
+    Color fg = selected ? ui.c.accent : (hov ? ui.c.text : ui.c.textDim);
+    ui.icon(item.icon, expanded ? r.x + 18 * s : r.x + r.w / 2, r.y + r.h / 2, 17 * s, fg, 1.7f);
+    if (expanded) ui.text({r.x + 36 * s, r.y, r.w - 44 * s, r.h}, item.label, 12.5f * s, selected ? ui.c.text : fg, AL_LEFT, selected ? 600 : 450);
+    bool hint = item.action == RailAction::Page && ((item.page == PG_DATA && !hasCorpus()) || (item.page == PG_BUILD && hasCorpus() && !hasMap()));
+    if (hint) ui.circle(r.r() - 9 * s, r.y + 10 * s, 3 * s, ui.c.accent);
+    ui.tipFor(idv, item.hint);
+    if (clicked) activateWorkspaceNav(item.id);
+  }
+  ui.endScroll(8 * s + float(count) * rowH);
+
+  auto bottomButton = [&](const string& id, const string& icon, const string& label, const string& tip, float yy, std::function<void()> action, bool selected = false) {
+    Rect r{railR.x + 6 * s, yy, railR.w - 12 * s, 32 * s};
+    uint64_t idv = ui.id("rail:bottom:" + id);
+    bool hov = false;
+    bool clicked = ui.behave(idv, r, &hov);
+    if (selected) ui.fill(r, ui.c.active, 6 * s);
+    else if (hov) ui.fill(r, ui.c.hover, 6 * s);
+    Color fg = selected ? ui.c.accent : (hov ? ui.c.text : ui.c.textDim);
+    ui.icon(icon, expanded ? r.x + 16 * s : r.x + r.w / 2, r.y + r.h / 2, 15 * s, fg, 1.7f);
+    if (expanded) ui.text({r.x + 31 * s, r.y, r.w - 36 * s, r.h}, label, 12 * s, selected ? ui.c.text : fg, AL_LEFT, selected ? 600 : 450);
+    ui.tipFor(idv, tip);
+    if (clicked) action();
+  };
+  float by = railR.b() - bottomH + 2 * s;
+  bottomButton("assistant", "sparkle", "Assistant", "Assistant workspace tool  (Ctrl+J)", by, [this] { setPage(page == PG_AI ? PG_NONE : PG_AI); }, page == PG_AI);
+  by += 34 * s;
+  bottomButton("commands", "command", "Commands", "Keyboard shortcuts and command palette  (F1 / Ctrl+K)", by, [this] { paletteOpen = true; paletteQuery.clear(); paletteSel = 0; });
 }
 
 void App::sectionTitle(Lay& L, const string& t, const string& help, const string& status) {
@@ -2098,7 +3512,8 @@ void App::drawLeftBody() {
   ui.line(leftR.r() - 0.5f, leftR.y, leftR.r() - 0.5f, leftR.b(), ui.c.border);
   // header
   Rect hr{leftR.x, leftR.y, leftR.w, 46 * s};
-  ui.text({hr.x + 16 * s, hr.y, hr.w - 60 * s, hr.h}, kPageTitles[page], 15 * s, ui.c.text, AL_LEFT, 600);
+  string panelTitle = workspace == WS_BIBLIOGRAPHY && page == PG_READ ? "Library" : kPageTitles[page];
+  ui.text({hr.x + 16 * s, hr.y, hr.w - 60 * s, hr.h}, panelTitle, 15 * s, ui.c.text, AL_LEFT, 600);
   if (ui.iconButton({hr.r() - 36 * s, hr.y + 10 * s, 26 * s, 26 * s}, "chev-left", "Hide panel")) page = PG_NONE;
   ui.line(hr.x + 16 * s, hr.b() - 0.5f, hr.r() - 16 * s, hr.b() - 0.5f, ui.c.border);
   if (page < 0) return;
@@ -2124,6 +3539,8 @@ void App::drawLeftBody() {
     case PG_TRENDS: pageTrends(L); break;
     case PG_ACTORS: pageActors(L); break;
     case PG_PUBLISH: pagePublish(L); break;
+    case PG_READ: pageRead(L); break;
+    case PG_WRITER: pageWriter(L); break;
     case PG_AI: pageAssistant(L); break;
   }
   ui.popId();
@@ -2176,6 +3593,30 @@ void App::drawStatus() {
 // =====================================================================================
 // canvas
 // =====================================================================================
+void App::drawBibliographyHome(const Rect& r) {
+  const float s = ui.s;
+  ui.fill(r, ui.c.bg);
+  const float cw = std::min(660 * s, std::max(280 * s, r.w - 48 * s));
+  const float x = r.x + (r.w - cw) / 2;
+  const float y = r.y + r.h * 0.32f;
+  ui.icon("book", x + cw / 2, y - 28 * s, 30 * s, ui.c.accent, 1.6f);
+  ui.text({x, y, cw, 34 * s}, "Bibliography", 22 * s, ui.c.text, AL_CENTER, 650);
+  string summary = hasCorpus() ? plural(long(P->corpus.recs.size()), "paper") + " in your library" : "Manage papers, PDFs, notes and citations in one place.";
+  if (hasCorpus() && P && !P->library.items.empty()) summary += "   ·   " + plural(long(P->library.items.size()), "PDF");
+  ui.text({x + 12 * s, y + 38 * s, cw - 24 * s, 22 * s}, summary, 13 * s, ui.c.textDim, AL_CENTER);
+
+  const float bw = std::min(190 * s, (cw - 24 * s) / 3);
+  const float gap = 10 * s;
+  const float bx = x + (cw - (3 * bw + 2 * gap)) / 2;
+  const float by = y + 82 * s;
+  if (ui.button({bx, by, bw, 34 * s}, "Papers", BTN_PRIMARY, "table")) openPapers("", -1, true, false);
+  if (ui.button({bx + bw + gap, by, bw, 34 * s}, "Add papers\xE2\x80\xA6", BTN_NORMAL, "plus")) cmdOpenFiles();
+  if (ui.button({bx + 2 * (bw + gap), by, bw, 34 * s}, "Review PDFs", BTN_NORMAL, "book")) activateWorkspaceNav("review");
+  ui.text({x + 24 * s, by + 52 * s, cw - 48 * s, 44 * s},
+          "Organize your library, review and annotate attached papers, keep notes, and cite directly while writing. Network maps and analysis are in the Visualization workspace.",
+          12 * s, ui.c.textFaint, AL_CENTER);
+}
+
 void App::drawWelcome() {
   float s = ui.s;
   Rect r = canvasR;
@@ -2241,7 +3682,7 @@ void App::drawStart() {
     ui.icon(acts[i].icon, ib.x + ib.w / 2, ib.y + ib.h / 2, 15 * s, ui.c.text, 1.6f);
     ui.text({rr.x + 44 * s, rr.y, rr.w - 50 * s, rr.h}, acts[i].label, 13 * s, ui.c.text, AL_LEFT, 500);
     if (clicked) {
-      if (acts[i].cmd == 0) { showStart = false; page = PG_DATA; }
+      if (acts[i].cmd == 0) { showStart = false; newProjectNow(); }
       else if (acts[i].cmd == 1) cmdOpenAny();
       else { showStart = false; cmdSample(false); }
     }
@@ -2257,7 +3698,7 @@ void App::drawStart() {
     for (size_t i = 0; i < std::min<size_t>(8, rec.size()); i++) {
       Rect rr{rp.x + 10 * s, ry, rp.w - 20 * s, 44 * s};
       if (rr.b() > rp.b() - 8 * s) break;
-      if (ui.listRow(rr, "start-recent" + std::to_string(i), false)) { string path = rec[i]; cmdOpenProject(path); if (hasCorpus() || hasMap()) showStart = false; return; }
+      if (ui.listRow(rr, "start-recent" + std::to_string(i), false)) { string path = rec[i]; cmdOpenProject(path); if (hasCorpus() || hasMap() || P->library.hasData() || !wdoc.empty()) showStart = false; return; }
       ui.icon("file", rr.x + 18 * s, rr.y + rr.h / 2, 18 * s, ui.c.textDim, 1.5f);
       string nm = fileName(rec[i]);
       if (nm.size() > 8 && lower(nm.substr(nm.size() - 8)) == ".vosproj") nm = nm.substr(0, nm.size() - 8);
@@ -2289,22 +3730,34 @@ void App::drawMainChart(const Rect& r) {
   uint64_t sig = chartSig();
   if (chartFresh > 0 || ce.frame == 0 || ce.sig != sig || ce.w != float(sw) || ce.h != float(sh) || ce.dark != ui.dark) {
     ce.sc = mainChart.make(sw, sh, t);
-    ce.sig = sig; ce.w = float(sw); ce.h = float(sh); ce.dark = ui.dark;
+    ce.sig = sig; ce.w = float(sw); ce.h = float(sh); ce.dark = ui.dark; ce.gen++;
   }
   ce.frame = std::max(1, frameNo);
   const Scene& sc = ce.sc;
-  float ox = card.x + 12 * s, oy = card.y + 12 * s;
-  drawScene(g.dc.get(), g.d2f.get(), g.dw.get(), g, sc, ox, oy, s);
-  if (card.has(ui.in.mx, ui.in.my) && !ui.anyPopup() && !ui.anyModal()) chartHover(sc, ox, oy, s);
+  // charts made at their own size (the assistant's show_chart) are fitted into the card and centred; page charts fill it exactly
+  float k = 1;
+  if (sc.W > 0 && sc.H > 0 && (std::fabs(sc.W - sw) > 0.5 || std::fabs(sc.H - sh) > 0.5)) k = float(std::min(sw / sc.W, sh / sc.H));
+  float ox = card.x + 12 * s + float((sw - sc.W * k) * s) / 2, oy = card.y + 12 * s + float((sh - sc.H * k) * s) / 2;
+  if (k == 1) { ox = card.x + 12 * s; oy = card.y + 12 * s; }
+  const float ks = s * k;
+  drawChartCached("#main|" + mainChart.title, ce.gen, sc, ox, oy, ks);
+  addChartHoverRegion(sc, card, ox, oy, ks, ui.id("chart-hover:main:" + mainChart.title));
+  if (card.has(ui.in.mx, ui.in.my) && !ui.anyPopup() && !ui.anyModal()) chartHover(sc, ox, oy, ks);
   if (card.has(ui.in.mx, ui.in.my) && mainChart.onClick) {
-    int tag = hitTag(sc, (ui.in.mx - ox) / s, (ui.in.my - oy) / s);
+    int tag = hitTag(sc, (ui.in.mx - ox) / ks, (ui.in.my - oy) / ks);
     if (tag >= 0) { ui.cursor = "hand"; if (ui.in.released[0] && ui.active == 0) mainChart.onClick(tag); }
   }
 }
 
 void App::drawCanvas() {
   chromeRects.clear();
-  if (page == PG_AI) { drawAssistant(canvasR); return; }
+  if (live.open) chromeRects.push_back(liveHitRect());
+  if (page == PG_AI) { drawAssistant(mainR); return; }
+  if (!writerOpen) writerDropImages();  // figure bitmaps are for the open writer only
+  if (readerOpen) { drawReader(mainR); return; }
+  if (writerOpen) { drawWriter(mainR); return; }
+  if (papersOpen) { drawPapers(mainR); return; }
+  if (workspace == WS_BIBLIOGRAPHY) { drawBibliographyHome(mainR); return; }
   if (!hasMap()) { drawWelcome(); return; }
   if (view == ViewKind::Matrix && !mainChartOpen) {
     ChartDef m;
@@ -2316,7 +3769,11 @@ void App::drawCanvas() {
     mainChart = keep;
     return;
   }
-  if (mainChartOpen && mainChart.valid()) { drawMainChart(canvasR); return; }
+  if (mainChartOpen && mainChart.valid()) { drawMainChart(mainR); return; }
+  if (splitActive()) {
+    drawSplitPanes();
+    if (splitMapPane() < 0) return;  // every pane is a chart: no map this frame
+  }
   drawCanvasChrome();
   canvasInput();
 }
@@ -2411,6 +3868,7 @@ void App::drawCanvasChrome() {
   }
   // ---- view chip (top-right); the Geo view shows its layer switch there
   if (view == ViewKind::Geo && geoMode() > 0) geoLayerSwitch();
+  else if (splitActive()) {}  // the map pane's picker shows the chip text (split.cpp)
   else {
     string chip = string(viewLabel(view)) + "  \xC2\xB7  " + plural(N.n(), N.unitNoun);
     if (view == ViewKind::ThreeD && !pos3dValid) chip += "  \xC2\xB7  computing 3D layout\xE2\x80\xA6";
@@ -2481,23 +3939,40 @@ void App::drawCanvasChrome() {
       x0 = std::min(x0, double(nv.pos[i][0])); x1 = std::max(x1, double(nv.pos[i][0]));
       y0 = std::min(y0, double(nv.pos[i][1])); y1 = std::max(y1, double(nv.pos[i][1]));
     }
-    if (x1 > x0) {
+    if (x1 >= x0) {  // at least one item shown (a single item, or items on one line, has a zero extent)
       Rect in = inset(r, 10 * s, 10 * s);
-      double k = std::min(in.w / (x1 - x0), in.h / (y1 - y0));
-      double ox = in.x + (in.w - (x1 - x0) * k) / 2, oy = in.y + (in.h - (y1 - y0) * k) / 2;
       const Encoder& e = nv.enc();
       int step = std::max(1, N.n() / 2500);
+      auto hidden = [&](int i) { return nv.flags.size() == nv.pos.size() && (nv.flags[size_t(i)] & NF_HIDDEN); };
+      // the scale: the items' extent plus their marks must fit the box (a map of two items with large circles used
+      // to spill over its edges). VOS-style marks have a screen size (capped here), Studio-style ones a world size.
+      const double rCap = 0.2 * std::min(in.w, in.h);
+      double rwMax = 0, rpxMax = 0;
       for (int i = 0; i < N.n(); i += step) {
-        if (nv.flags.size() == nv.pos.size() && (nv.flags[size_t(i)] & NF_HIDDEN)) continue;
+        if (hidden(i)) continue;
+        if (e.vos()) rpxMax = std::max(rpxMax, std::min(rCap, e.vosRadiusPx(i) * s * 0.28));
+        else rwMax = std::max(rwMax, e.radius(i) * 0.9);
+      }
+      const double spanX = x1 - x0, spanY = y1 - y0;
+      auto fitK = [&](double w, double h, double pad) {  // px per world unit so that the extent (plus a world pad) fits w x h
+        double sx = spanX + 2 * pad, sy = spanY + 2 * pad;
+        double kx = sx > 1e-9 ? w / sx : 1e18, ky = sy > 1e-9 ? h / sy : 1e18;
+        double kk = std::min(kx, ky);
+        return kk >= 1e17 || !(kk > 0) ? 1.0 : kk;
+      };
+      const double k = e.vos() ? fitK(std::max(4.0, in.w - 2 * rpxMax), std::max(4.0, in.h - 2 * rpxMax), 0) : fitK(in.w, in.h, rwMax);
+      double ox = in.x + (in.w - spanX * k) / 2, oy = in.y + (in.h - spanY * k) / 2;
+      ui.pushClip(r);
+      for (int i = 0; i < N.n(); i += step) {
+        if (hidden(i)) continue;
         float px = float(ox + (nv.pos[size_t(i)][0] - x0) * k), py = float(oy + (nv.pos[size_t(i)][1] - y0) * k);
-        float rr = std::max(1.2f * s, float(e.vos() ? e.vosRadiusPx(i) * s * 0.28 : e.radius(i) * k * 0.9));
+        float rr = std::max(1.2f * s, float(e.vos() ? std::min(rCap, e.vosRadiusPx(i) * s * 0.28) : e.radius(i) * k * 0.9));
         ui.fill({px - rr, py - rr, rr * 2, rr * 2}, e.nodeColor(i, view).withA(0.85f), rr);
       }
       double wx0, wy0, wx1, wy1;
       nv.screenToWorld(canvasR.x, canvasR.y, wx0, wy0);
       nv.screenToWorld(canvasR.r(), canvasR.b(), wx1, wy1);
       Rect vr{float(ox + (wx0 - x0) * k), float(oy + (wy0 - y0) * k), float((wx1 - wx0) * k), float((wy1 - wy0) * k)};
-      ui.pushClip(r);
       ui.fill(vr, ui.c.text.withA(0.04f), 2 * s);
       ui.stroke(vr, ui.c.accent.withA(0.8f), 2 * s, 1.f * s);
       ui.popClip();
@@ -2552,6 +4027,85 @@ void App::drawCanvasChrome() {
 }
 
 void App::addChrome(const Rect& r) { chromeRects.push_back(r); }
+void App::timelineRange(double* s0, double* s1, double* x0, double* x1) { *s0 = tlS0; *s1 = tlS1; *x0 = tlX0; *x1 = tlX1; }
+
+void App::addChartHoverRegion(const Scene& scene, const Rect& bounds, float ox, float oy, float scale, uint64_t context) {
+  if (scale <= 0 || bounds.w <= 0 || bounds.h <= 0) return;
+  chartHoverRegions_.push_back({&scene, bounds, ui.activeClip(), ui.hasClip(), ox, oy, scale, context});
+}
+
+bool App::chartHoverTargetAt(float x, float y, uint64_t& target) const {
+  target = 0;
+  for (auto it = chartHoverRegions_.rbegin(); it != chartHoverRegions_.rend(); ++it) {
+    if (!it->scene || !it->bounds.has(x, y) || (it->clipped && !it->clip.has(x, y))) continue;
+    const Scene& scene = *it->scene;
+    const double sx = (x - it->ox) / it->scale, sy = (y - it->oy) / it->scale;
+    uint64_t item = 0;
+    const int tag = hitTag(scene, sx, sy);
+    const Prim* p = tipAt(scene, sx, sy);
+    uint64_t primitive = 0;
+    if (p && !scene.items.empty()) {
+      const std::ptrdiff_t index = p - scene.items.data();
+      if (index >= 0 && size_t(index) < scene.items.size() && uint64_t(index) < 0xffffffffull) primitive = uint64_t(index) + 1;
+    }
+    if (tag >= 0) item = (uint64_t(uint32_t(tag) + 1) << 32) | primitive;
+    else if (primitive) item = (0xffffffffull << 32) | primitive;
+    if (item) {
+      uint64_t h = it->context ^ (item + 0x9e3779b97f4a7c15ull + (it->context << 6) + (it->context >> 2));
+      h ^= h >> 30; h *= 0xbf58476d1ce4e5b9ull; h ^= h >> 27; h *= 0x94d049bb133111ebull; h ^= h >> 31;
+      target = h ? h : 0x6000000000000001ull;
+    }
+    return true;  // the topmost chart owns blank space too; do not hit a chart/map below it
+  }
+  return false;
+}
+
+uint64_t App::pointerHoverIdAt(float x, float y) {
+  if (captionBtn(1).has(x, y)) return 0x2000000000000001ull;  // system-handled maximize button still has a hover state
+  uint64_t target = 0;
+  if (readerOpen && readerHoverTargetAt(x, y, target)) return target;
+  target = ui.hoverTargetAt(x, y);
+  if (target) return target;
+  bool overChrome = false;
+  for (const Rect& r : chromeRects) if (r.has(x, y)) { overChrome = true; break; }
+  if (!overChrome && !ui.anyPopup() && !ui.anyModal() && !paletteOpen && chartHoverTargetAt(x, y, target)) return target;
+  if (!overChrome && !ui.anyPopup() && !ui.anyModal() && !paletteOpen && splitActive()) {
+    for (int i = 3; i >= 0; --i) {
+      const LivePane& L = livePane_[i];
+      if (!L.ready || L.vp.w <= 0 || !L.vp.has(x, y)) continue;
+      if (L.chrome.has(x, y)) return 0;
+      const int node = L.nv.hitNode(x, y);
+      return node >= 0 ? (0x9000000000000000ull | (uint64_t(i + 1) << 32) | uint64_t(node + 1)) : 0;
+    }
+  }
+
+  const bool networkCanvas = hasMap() && workspace != WS_BIBLIOGRAPHY && view != ViewKind::Matrix && !mainChartOpen && !(papersOpen && hasCorpus()) &&
+                             !writerOpen && !readerOpen && page != PG_AI && !(splitActive() && splitMapPane() < 0);
+  if (networkCanvas && canvasR.has(x, y)) {
+    bool overChrome = false;
+    for (const Rect& r : chromeRects) if (r.has(x, y)) { overChrome = true; break; }
+    if (!overChrome && !ui.anyPopup() && !ui.anyModal() && !paletteOpen) {
+      const int node = nv.hitNode(x, y);
+      if (node >= 0) return 0x8000000000000000ull | uint64_t(node + 1);
+      if (view == ViewKind::Geo && (geoModeA || geoDocsMax > 0)) {
+        const int country = geoHit(x, y);
+        return country >= 0 ? (0xB000000000000000ull | uint64_t(country + 1)) : 0;
+      }
+      return 0;
+    }
+    return 0;
+  }
+  return 0;
+}
+
+bool App::pointerMoveNeedsFrame(float x, float y) {
+  if (input.down[0] || input.down[1] || input.down[2] || ui.active != 0 || maxBtnDown) return true;  // drag/capture paths stay full-rate
+  const uint64_t target = pointerHoverIdAt(x, y);
+  const bool changed = target != pointerHoverTarget_;
+  pointerHoverTarget_ = target;
+
+  return changed;
+}
 
 void App::canvasInput() {
   const Input& in = ui.in;
@@ -2563,16 +4117,20 @@ void App::canvasInput() {
   bool is3D = view == ViewKind::ThreeD;
   bool canMove = !is3D && (view == ViewKind::Network || view == ViewKind::Overlay || view == ViewKind::Density);
   // hover
-  if (drag == DR_NONE) hover = inside && free ? nv.hitNode(in.mx, in.my) : -1;
+  if (drag == DR_NONE) {
+    int h = inside && free ? nv.hitNode(in.mx, in.my) : -1;
+    if (h != hover) { hover = h; needFrame = true; }  // fallback when this frame's newly drawn chrome changes the hit area
+  }
   if (view == ViewKind::Geo) geoChrome(inside && free && hover < 0 && (drag == DR_NONE || drag == DR_PAN));
   if (hover >= 0 && drag == DR_NONE) ui.cursor = canMove ? "hand" : "hand";
   // wheel
-  if (inside && in.wheel != 0) {
-    if (is3D) nv.cam.dist3 = clampv(nv.cam.dist3 * std::pow(0.88, double(in.wheel)), 0.2, 6.0);
+  const float zoomGesture = in.wheel + in.pinch;
+  if (inside && zoomGesture != 0) {
+    if (is3D) nv.cam.dist3 = clampv(nv.cam.dist3 * std::pow(0.88, double(zoomGesture)), 0.2, 6.0);
     else {
       double z0 = camTargetZoom > 0 ? camTargetZoom : nv.cam.zoom;
       double cx0 = camTargetZoom > 0 ? camTargetX : nv.cam.x, cy0 = camTargetZoom > 0 ? camTargetY : nv.cam.y;
-      double z1 = clampv(z0 * std::pow(1.2, double(in.wheel)), nv.fitZoom() * 0.15, nv.fitZoom() * 120);
+      double z1 = clampv(z0 * std::pow(1.2, double(zoomGesture)), nv.fitZoom() * 0.15, nv.fitZoom() * 120);
       // keep the world point under the cursor fixed (computed against the target camera)
       double mxw = cx0 + (in.mx - (canvasR.x + canvasR.w / 2)) / z0, myw = cy0 + (in.my - (canvasR.y + canvasR.h / 2)) / z0;
       camTargetZoom = z1;
@@ -2616,9 +4174,11 @@ void App::canvasInput() {
         double wx, wy;
         nv.screenToWorld(in.mx, in.my, wx, wy);
         Node& nd = P->net.nodes[size_t(dragNode)];
-        nd.x = wx; nd.y = wy; nd.pinned = true;
+        nd.x = wx; nd.y = wy;
+        if (!nd.pinned) { nd.pinned = true; invalidateFlags(); }
         nv.pos[size_t(dragNode)][0] = float(wx);
         nv.pos[size_t(dragNode)][1] = float(wy);
+        nv.positionsChanged();
         nv.nodesDirty = nv.linksDirty = true;
         ui.cursor = "move";
       }
@@ -2629,13 +4189,15 @@ void App::canvasInput() {
   lastMx = in.mx; lastMy = in.my;
   if (!anyDown) {
     if (!dragMoved) {
-      if (drag == DR_NODE && dragNode >= 0) selectNode(dragNode, in.ctrl);
+      if (drag == DR_NODE && dragNode >= 0 && !in.touchCancel) selectNode(dragNode, in.ctrl);
       else if (drag == DR_PAN || drag == DR_ORBIT) { if (in.released[0]) { clearSelection(); } }
     } else if (drag == DR_BOX) {
       Rect br{std::min(dragX0, in.mx), std::min(dragY0, in.my), std::fabs(in.mx - dragX0), std::fabs(in.my - dragY0)};
       auto v = nv.nodesInRect(br);
-      if (!in.ctrl) selection.clear();
-      for (int i : v) if (std::find(selection.begin(), selection.end(), i) == selection.end()) selection.push_back(i);
+      bool selectionChanged = false;
+      if (!in.ctrl && !selection.empty()) { selection.clear(); selectionChanged = true; }
+      for (int i : v) if (std::find(selection.begin(), selection.end(), i) == selection.end()) { selection.push_back(i); selectionChanged = true; }
+      if (selectionChanged) invalidateFlags();
       if (!v.empty()) ui.toast("Selection", plural(long(selection.size()), P->net.unitNoun) + " selected", 0, 1.6);
     } else if (drag == DR_NODE && !dragSnap.pos.empty()) {
       P->dirty = true;
@@ -2698,7 +4260,7 @@ void App::drawInspectorBody() {
     // actions
     auto ac = cols(L.row(30 * s), 3, 6 * s);
     if (ui.button(ac[0], "Focus", BTN_NORMAL, "target")) focusOn(i);
-    if (ui.button(ac[1], nd.pinned ? "Unpin" : "Pin", BTN_NORMAL, "pin")) { pushUndo(nd.pinned ? "Unpin" : "Pin"); P->net.nodes[size_t(i)].pinned = !nd.pinned; }
+    if (ui.button(ac[1], nd.pinned ? "Unpin" : "Pin", BTN_NORMAL, "pin")) { pushUndo(nd.pinned ? "Unpin" : "Pin"); P->net.nodes[size_t(i)].pinned = !nd.pinned; invalidateFlags(); }
     if (ui.button(ac[2], "Copy", BTN_NORMAL, "copy")) { setClipboardText(hwnd, nd.label); ui.toast("Copied", nd.label, 1, 1.5); }
     if (ui.button(L.row(30 * s), "Explain with AI", BTN_GHOST, "sparkle", !aiLive)) aiRun(ai::Task::Explain);
     if (P->mapSource == "analysis" && !nd.key.empty()) {
@@ -2765,7 +4327,7 @@ void App::drawInspectorBody() {
       ui.text(r, std::to_string(kv.second), 12 * s, ui.c.textDim, AL_RIGHT);
     }
     auto ac = cols(L.row(30 * s), 2, 6 * s);
-    if (ui.button(ac[0], "Pin all", BTN_NORMAL, "pin")) { pushUndo("Pin"); for (int i : selection) P->net.nodes[size_t(i)].pinned = true; }
+    if (ui.button(ac[0], "Pin all", BTN_NORMAL, "pin")) { pushUndo("Pin"); bool changed = false; for (int i : selection) if (!P->net.nodes[size_t(i)].pinned) { P->net.nodes[size_t(i)].pinned = true; changed = true; } if (changed) invalidateFlags(); }
     if (ui.button(ac[1], "Clear", BTN_NORMAL, "x")) clearSelection();
     sectionTitle(L, "Items");
     vector<int> sel = selection;
@@ -2830,57 +4392,143 @@ string App::openAlexKey() const { return trim(settings.j["openalexKey"].str()); 
 void App::drawPalette() {
   if (!paletteOpen) return;
   float s = ui.s;
+  ui.unblock();  // everything under the palette is blocked for this frame (App::frame); its own widgets take the mouse
   ui.fill({0, 0, float(g.W), float(g.H)}, Color(0, 0, 0, ui.dark ? 0.45f : 0.25f));
-  float w = std::min(640 * s, float(g.W) - 80 * s);
-  Rect r{(g.W - w) / 2, 90 * s, w, 0};
-  // candidates
-  struct Item { string label, hint, sc, icon; std::function<void()> run; };
+  float w = std::min(680 * s, float(g.W) - 80 * s);
+  float top = std::min(90 * s, float(g.H) * 0.08f);
+  Rect r{std::round((g.W - w) / 2), top, w, 0};
+  // candidates: every command, ranked when there is a query (label prefix > word start > anywhere in the label > hint > all words)
+  struct Item { string label, hint, sc, icon, group; std::function<void()> run; int score = 0; };
   vector<Item> items;
   string q = lower(trim(paletteQuery));
+  vector<string> words;
+  for (auto& wd : split(q, ' ')) if (!wd.empty()) words.push_back(wd);
+  auto scoreOf = [&](const string& label, const string& hint) -> int {
+    if (q.empty()) return 0;
+    string l = lower(label);
+    if (l.rfind(q, 0) == 0) return 400;
+    size_t p = l.find(q);
+    if (p != string::npos) return (l[p - 1] == ' ' || l[p - 1] == ':' || l[p - 1] == '(' || l[p - 1] == '/') ? 300 : 200;
+    if (icontains(hint, q)) return 100;
+    if (words.size() > 1) {
+      string all = l + " " + lower(hint);
+      for (auto& wd : words) if (all.find(wd) == string::npos) return -1;
+      return 50;
+    }
+    return -1;
+  };
   for (auto& c : commands) {
-    if (!q.empty() && !icontains(c.label, q) && !icontains(c.hint, q)) continue;
-    items.push_back({c.label, c.hint, c.shortcut, c.icon, c.run});
+    if (workspace == WS_BIBLIOGRAPHY) {
+      const string& id = c.id;
+      if (c.group == "Map" || c.group == "Analyse" || id.rfind("page", 0) == 0 || id.rfind("view", 0) == 0 || id.rfind("split", 0) == 0 ||
+          id == "fit" || id == "maphist" || id == "inspector" || id == "labels" || id == "legend" || id == "hulls" || id == "names" || id == "minimap" ||
+          id == "clyears" || id == "trtopics" || id == "rpys" || id == "topdocs" || id == "topdoc" || id == "figall") continue;
+    }
+    int sc = scoreOf(c.label, c.hint);
+    if (sc < 0) continue;
+    items.push_back({c.label, c.hint, c.shortcut, c.icon, c.group, c.run, sc});
   }
-  if (hasMap() && q.size() >= 2) {
+  if (workspace == WS_VISUALIZATION && hasMap() && q.size() >= 2) {
     int k = 0;
     for (int i = 0; i < P->net.n() && k < 8; i++)
-      if (icontains(P->net.nodes[size_t(i)].label, q)) { items.push_back({"Go to \xE2\x80\x9C" + P->net.nodes[size_t(i)].label + "\xE2\x80\x9D", "Cluster " + std::to_string(P->net.nodes[size_t(i)].cluster + 1), "", "target", [this, i] { focusOn(i); }}); k++; }
+      if (icontains(P->net.nodes[size_t(i)].label, q)) {
+        items.push_back({"Go to \xE2\x80\x9C" + P->net.nodes[size_t(i)].label + "\xE2\x80\x9D", "Cluster " + std::to_string(P->net.nodes[size_t(i)].cluster + 1), "", "search", "Items", [this, i] { focusOn(i); }, 90});
+        k++;
+      }
   }
-  int n = std::min<int>(12, int(items.size()));
-  r.h = 56 * s + n * 40 * s + (n ? 8 * s : 40 * s);
+  if (!q.empty()) std::stable_sort(items.begin(), items.end(), [](const Item& a, const Item& b) { return a.score > b.score; });
+  // rows: sections with headers while browsing, one ranked list while searching
+  struct Row { int item; const char* header; };
+  vector<Row> rows;
+  if (q.empty()) {
+    for (const char* gname : kPaletteGroups) {
+      bool any = false;
+      for (size_t i = 0; i < items.size(); i++)
+        if (items[i].group == gname) { if (!any) { rows.push_back({-1, gname}); any = true; } rows.push_back({int(i), nullptr}); }
+    }
+  } else for (size_t i = 0; i < items.size(); i++) rows.push_back({int(i), nullptr});
+  vector<int> sel;                              // row of each selectable entry
+  vector<int> selOfRow(rows.size(), -1);        // selectable index of a row
+  for (size_t k = 0; k < rows.size(); k++) if (rows[k].item >= 0) { selOfRow[k] = int(sel.size()); sel.push_back(int(k)); }
+  int n = int(sel.size());
+  const float rowH = 40 * s, headH = 26 * s, footH = 30 * s;
+  vector<float> rowY(rows.size());
+  float contentH = 4 * s;
+  for (size_t k = 0; k < rows.size(); k++) { rowY[k] = contentH; contentH += rows[k].header ? headH : rowH; }
+  contentH += 4 * s;
+  // as tall as the window allows: no more hidden commands
+  float listMax = std::max(4 * rowH, float(g.H) - top - 56 * s - footH - 24 * s);
+  float listH = n ? std::min(contentH, listMax) : 40 * s;
+  r.h = 56 * s + listH + footH;
   ui.shadow(r, 14 * s, 30 * s);
   ui.fill(r, ui.c.panel2, 12 * s);
   ui.stroke(r, ui.c.borderStrong, 12 * s);
   ui.focus = ui.id("ti:palette");  // text inputs register as "ti:" + key
   bool submitted = false;
   string before = paletteQuery;
-  ui.textInput({r.x + 10 * s, r.y + 10 * s, r.w - 20 * s, 38 * s}, "palette", paletteQuery, "Type a command or an item name\xE2\x80\xA6", &submitted, "command");
-  if (paletteQuery != before) paletteSel = 0;
+  ui.textInput({r.x + 10 * s, r.y + 10 * s, r.w - 20 * s, 38 * s}, "palette", paletteQuery, "Type a command, a page or an item name\xE2\x80\xA6", &submitted, "command");
+  if (paletteQuery != before) { paletteSel = 0; ui.scrollSet("palette", 0); }
+  int pageRows = std::max(1, int(listH / rowH) - 1);
+  bool moved = false;
   for (int k : ui.in.keys) {
-    if (k == VK_DOWN) paletteSel = std::min(n - 1, paletteSel + 1);
-    if (k == VK_UP) paletteSel = std::max(0, paletteSel - 1);
+    if (k == VK_DOWN) { paletteSel++; moved = true; }
+    if (k == VK_UP) { paletteSel--; moved = true; }
+    if (k == VK_NEXT) { paletteSel += pageRows; moved = true; }
+    if (k == VK_PRIOR) { paletteSel -= pageRows; moved = true; }
+    if (k == VK_HOME) { paletteSel = 0; moved = true; }
+    if (k == VK_END) { paletteSel = n - 1; moved = true; }
   }
   paletteSel = clampv(paletteSel, 0, std::max(0, n - 1));
+  Rect listR{r.x, r.y + 56 * s, r.w, listH};
+  if (n && moved) {  // keep the selection in view after a keyboard move (a section header comes along)
+    int rk = sel[size_t(paletteSel)];
+    float y0 = rowY[size_t(rk)] - ((rk > 0 && rows[size_t(rk) - 1].header) ? headH : 0) - 4 * s, y1 = rowY[size_t(rk)] + rowH + 4 * s;
+    float cur = ui.scrollGet("palette");
+    if (y0 < cur) ui.scrollSet("palette", y0);
+    else if (y1 > cur + listH) ui.scrollSet("palette", y1 - listH);
+    needFrame = true;
+  }
   std::function<void()> run;
-  for (int k = 0; k < n; k++) {
-    Rect rr{r.x + 6 * s, r.y + 56 * s + k * 40 * s, r.w - 12 * s, 38 * s};
-    bool hov = rr.has(ui.in.mx, ui.in.my);
-    if (hov && (ui.in.mx != lastMx || ui.in.my != lastMy)) paletteSel = k;
-    if (k == paletteSel) ui.fill(rr, ui.c.accent.withA(0.16f), 7 * s);
-    if (hov && ui.in.released[0]) run = items[size_t(k)].run;
-    ui.icon(items[size_t(k)].icon, rr.x + 20 * s, rr.y + rr.h / 2, 16 * s, k == paletteSel ? ui.c.accent : ui.c.textDim);
-    ui.text({rr.x + 42 * s, rr.y + 2 * s, rr.w * 0.55f, 20 * s}, items[size_t(k)].label, 13 * s, ui.c.text, AL_LEFT, 550);
-    if (!items[size_t(k)].hint.empty()) ui.text({rr.x + 42 * s, rr.y + 20 * s, rr.w - 170 * s, 16 * s}, items[size_t(k)].hint, 11 * s, ui.c.textFaint);
-    if (!items[size_t(k)].sc.empty()) {
-      float kw = ui.textW(items[size_t(k)].sc, 11 * s, 600) + 14 * s;
+  bool inList = listR.has(ui.in.mx, ui.in.my);
+  int selRow = n ? sel[size_t(paletteSel)] : -1;
+  ui.beginScroll("palette", listR);
+  float sy = ui.scrollY();
+  for (size_t k = 0; k < rows.size(); k++) {
+    float y = listR.y + rowY[k] - sy;
+    float h = rows[k].header ? headH : rowH;
+    if (y + h < listR.y || y > listR.b()) continue;
+    if (rows[k].header) {
+      ui.text({r.x + 18 * s, y + 7 * s, r.w - 36 * s, 16 * s}, rows[k].header, 10.5f * s, ui.c.textFaint, AL_LEFT, 700);
+      continue;
+    }
+    const Item& it = items[size_t(rows[k].item)];
+    Rect rr{r.x + 6 * s, y, r.w - 12 * s, rowH - 2 * s};
+    bool hov = inList && rr.has(ui.in.mx, ui.in.my);
+    if (hov && (ui.in.mx != lastMx || ui.in.my != lastMy)) { paletteSel = selOfRow[k]; selRow = int(k); }
+    bool selected = int(k) == selRow;
+    if (selected) ui.fill(rr, ui.c.accent.withA(0.16f), 7 * s);
+    if (hov && ui.in.released[0]) run = it.run;
+    ui.icon(it.icon, rr.x + 20 * s, rr.y + rr.h / 2, 16 * s, selected ? ui.c.accent : ui.c.textDim);
+    ui.text({rr.x + 42 * s, rr.y + 2 * s, rr.w * 0.6f, 20 * s}, it.label, 13 * s, ui.c.text, AL_LEFT, 550);
+    if (!it.hint.empty()) ui.text({rr.x + 42 * s, rr.y + 20 * s, rr.w - 170 * s, 16 * s}, it.hint, 11 * s, ui.c.textFaint);
+    if (!it.sc.empty()) {
+      float kw = ui.textW(it.sc, 11 * s, 600) + 14 * s;
       Rect kr{rr.r() - kw - 10 * s, rr.y + 9 * s, kw, 20 * s};
       ui.fill(kr, ui.c.input, 5 * s);
       ui.stroke(kr, ui.c.border, 5 * s);
-      ui.text(kr, items[size_t(k)].sc, 11 * s, ui.c.textDim, AL_CENTER, 600, true);
+      ui.text(kr, it.sc, 11 * s, ui.c.textDim, AL_CENTER, 600, true);
     }
   }
-  if (!n) ui.text({r.x, r.y + 56 * s, r.w, 30 * s}, "No matching commands", 12.5f * s, ui.c.textDim, AL_CENTER);
-  if (submitted && n) run = items[size_t(paletteSel)].run;
+  ui.endScroll(contentH);
+  if (!n) ui.text({r.x, listR.y, r.w, 30 * s}, "No matching commands", 12.5f * s, ui.c.textDim, AL_CENTER);
+  // footer: what is listed, and the keys
+  Rect fr{r.x, r.b() - footH, r.w, footH};
+  ui.line(fr.x + 10 * s, fr.y + 0.5f, fr.r() - 10 * s, fr.y + 0.5f, ui.c.border);
+  string what = q.empty() ? plural(long(n), "command") + " in " + plural(long(std::count_if(rows.begin(), rows.end(), [](const Row& rw) { return rw.header != nullptr; })), "section")
+                          : (n ? std::to_string(n) + (n == 1 ? " match" : " matches") : string("No matches"));
+  ui.text({fr.x + 16 * s, fr.y, fr.w / 2, fr.h}, what, 11 * s, ui.c.textFaint);
+  ui.text({fr.x + fr.w / 2 - 16 * s, fr.y, fr.w / 2, fr.h}, "\xE2\x86\x91\xE2\x86\x93 move \xC2\xB7 PgUp/PgDn \xC2\xB7 Enter run \xC2\xB7 Esc close", 11 * s, ui.c.textFaint, AL_RIGHT);
+  if (submitted && n) run = items[size_t(rows[size_t(sel[size_t(paletteSel)])].item)].run;
   if (ui.in.pressed[0] && !r.has(ui.in.mx, ui.in.my)) { paletteOpen = false; ui.focus = 0; }
   if (run) { paletteOpen = false; ui.focus = 0; run(); }
   lastMx = ui.in.mx; lastMy = ui.in.my;
@@ -2889,54 +4537,101 @@ void App::drawPalette() {
 // =====================================================================================
 // script mode: one command per frame; used for automated screenshots and smoke tests
 // =====================================================================================
+static bool g_clickHeld = false;  // synthetic input for tests: a scripted click is released on the following frame
+
+bool App::shotPending() const { return pendingShot; }
+void App::shotRequest(const string& path, bool canvasOnly) { pendingShot = true; pendingShotPath = path; pendingViewCrop = canvasOnly; needFrame = true; }
+const char* App::pageTitle(int p) { return p >= 0 && p < PG_COUNT ? kPageTitles[p] : ""; }
+
 void App::stepScript() {
-  // synthetic input for tests: a scripted click is released on the following frame
-  static bool clickHeld = false;
-  if (clickHeld) { input.down[0] = false; input.released[0] = true; clickHeld = false; }
+  if (g_clickHeld) { input.down[0] = false; input.released[0] = true; g_clickHeld = false; }
   if (scriptWait > 0) { scriptWait--; return; }
   if (busy() || (job && job->finished) || animT0 >= 0) return;
   if (scriptPos >= script.size()) { if (P) P->dirty = false; PostMessageW(hwnd, WM_CLOSE, 0, 0); scriptMode = false; return; }
   string line = script[scriptPos++];
+  runCommand(line);
+}
+
+// One automation command. Shared by the script runner and by the AI's run_commands tool (agent.cpp), which filters the
+// commands it allows and waits for jobs between them. `note` receives a short outcome for the AI where it matters.
+bool App::runCommand(const string& line, string* note) {
   auto parts = split(line, ' ');
   string cmd = parts.empty() ? "" : parts[0];
   string arg = parts.size() > 1 ? trim(line.substr(cmd.size())) : "";
-  if (cmd == "sample") cmdSample(arg == "scopus");
-  else if (cmd == "open") dropFiles(split(arg, '|'));  // several files: a|b (e.g. VOSviewer map|network)
-  else if (cmd == "build") cmdBuild();
-  else if (cmd == "type") { AnaType t; if (typeFromId(arg, t)) { P->spec.type = t; P->spec.unit = typeInfo(t).units[0].first; P->spec.setDefaults(); } }
-  else if (cmd == "unit") { Unit u; if (unitFromId(arg, u)) { P->spec.unit = u; P->spec.setDefaults(); } }
-  else if (cmd == "min") P->spec.min = toInt(arg, 1);
-  else if (cmd == "view") { for (auto& v : kViews) if (iequals(v.label, arg)) setView(v.v, false); }
-  else if (cmd == "page") { page = PG_NONE; for (int p = 0; p < PG_COUNT; p++) if (iequals(kPageTitles[p], arg)) page = p; }
-  else if (cmd == "tab") { int t = toInt(arg); anaTab = trTab = acTab = t; }
-  else if (cmd == "theme") setTheme(arg != "light");
-  else if (cmd == "look") { applyLook(P->style, arg); P->style.darkTheme = ui.dark; styleDirty = true; if (hasMap()) { nv.fit(); camTargetZoom = -1; } }
-  else if (cmd == "select") { runSearch(); search = arg; runSearch(); if (!searchHits.empty()) focusOn(searchHits[0]); camTargetZoom = -1; }
-  else if (cmd == "search") { search = arg; runSearch(); }
-  else if (cmd == "clearsearch") { search.clear(); searchHits.clear(); }
+  auto say = [&](const string& t) { if (note) *note = t; };
+  if (cmd == "sample") { cmdSample(arg == "scopus"); say("Loaded the " + string(arg == "scopus" ? "Scopus" : "Web of Science") + " sample: " + plural(long(P->corpus.recs.size()), "record") + " now loaded."); }
+  else if (cmd == "open") {  // several files: a|b (e.g. VOSviewer map|network)
+    vector<string> fs = split(arg, '|');
+    vector<string> missing;
+    for (auto& f : fs) { bool ok = false; (void)readFileU(f, &ok); if (!ok) missing.push_back(f); }
+    if (!missing.empty()) say("Cannot read: " + join(missing, ", ") + ". Check the path (use the full path).");
+    else { dropFiles(fs); say(busy() ? "Importing " + plural(long(fs.size()), "file") + "\xE2\x80\xA6" : "Opened."); }
+  }
+  else if (cmd == "build") { if (!hasCorpus()) say("No records are loaded, nothing to build."); else { cmdBuild(); say(busy() ? "Building the map\xE2\x80\xA6" : (lastJobError.empty() ? "The build did not start." : lastJobError)); } }
+  else if (cmd == "type") { AnaType t; if (typeFromId(arg, t)) { P->spec.type = t; P->spec.unit = typeInfo(t).units[0].first; P->spec.setDefaults(); say("Analysis type " + string(typeInfo(t).label) + ", unit reset to " + string(unitId(P->spec.unit)) + "."); } else say("Unknown type \"" + arg + "\": use cooc, coauth, citation, coupling or cocit."); }
+  else if (cmd == "unit") { Unit u; if (unitFromId(arg, u)) { P->spec.unit = u; P->spec.setDefaults(); say("Unit " + string(unitId(u)) + " (threshold reset to " + std::to_string(P->spec.min) + ")."); } else say("Unknown unit \"" + arg + "\": use allKeywords, keywords, indexTerms, terms, authors, orgs, countries, docs, sources, refs, csources or cauthors."); }
+  else if (cmd == "min") { P->spec.min = toInt(arg, 1); say("Minimum occurrences " + std::to_string(P->spec.min) + "."); }
+  else if (cmd == "view") { bool f = false; for (auto& v : kViews) if (iequals(v.label, arg) || (iequals(arg, "3d") && v.label == string("3D"))) { setView(v.v, false); f = true; } say(f ? "View: " + viewName(view) + "." : "Unknown view \"" + arg + "\": network, overlay, density, timeline, matrix, geo or 3d."); }
+  else if (cmd == "page") { page = PG_NONE; for (int p = 0; p < PG_COUNT; p++) if (iequals(kPageTitles[p], arg)) page = p; if (page == PG_WRITER && !writerOpen) openWriter(); say(page >= 0 ? "Page " + string(kPageTitles[page]) + "." : "Unknown page \"" + arg + "\" (Data, Build, Look, Analyse, Trends, Actors, Read, Write, Publish, Assistant)."); }
+  else if (cmd == "tab") { int t = toInt(arg); anaTab = trTab = acTab = t; say("Tab " + std::to_string(t) + "."); }
+  else if (cmd == "theme") { setTheme(arg != "light"); say(string("Theme ") + (ui.dark ? "dark" : "light") + "."); }
+  else if (cmd == "look") { bool f = false; for (auto& lk : lookPresets()) if (lk.id == arg) f = true; if (f) { applyLook(P->style, arg); P->style.darkTheme = ui.dark; styleDirty = true; if (hasMap()) { nv.fit(); camTargetZoom = -1; } say("Look " + arg + "."); } else say("Unknown look \"" + arg + "\": vosviewer, studio, paper or midnight."); }
+  else if (cmd == "select") { runSearch(); search = arg; runSearch(); if (!searchHits.empty()) focusOn(searchHits[0]); camTargetZoom = -1; say(searchHits.empty() ? "No item matches \"" + arg + "\"." : "Selected " + P->net.nodes[size_t(searchHits[0])].label + " (" + plural(long(searchHits.size()), "hit") + ")."); }
+  else if (cmd == "search") { search = arg; runSearch(); say(plural(long(searchHits.size()), "hit") + " for \"" + arg + "\"."); }
+  else if (cmd == "clearsearch") { search.clear(); searchHits.clear(); invalidateFlags(); }
   else if (cmd == "hover") { input.mx = float(toDouble(split(arg, ' ')[0])); input.my = float(toDouble(split(arg, ' ').back())); }
   else if (cmd == "palette") { paletteOpen = true; paletteQuery = arg; }
   else if (cmd == "maxlines") { P->style.maxLines = toInt(arg, 1000); styleDirty = true; }
+  else if (cmd == "canvascache") { setCanvasCache(arg != "0" && arg != "off"); say(string("Canvas cache ") + (canvasCacheOn ? "on." : "off.")); }
+  else if (cmd == "textcache") { setTextCache(arg != "0" && arg != "off"); say(string("Text cache ") + (ui.textCacheOn ? "on." : "off.")); }
+  else if (cmd == "perf") { perfHud = arg.empty() ? !perfHud : (arg != "0" && arg != "off"); perf_ = PerfWindow{}; perfShown_ = PerfWindow{}; perfT0_ = 0; perfCpuT_ = 0; say(string("Performance overlay ") + (perfHud ? "on." : "off.")); }
   else if (cmd == "linkgeom") { P->style.linkGeom = arg == "straight" ? LinkGeom::Straight : arg == "arc" ? LinkGeom::Arc : LinkGeom::Curved; styleDirty = true; }
   else if (cmd == "keys") { for (unsigned char ch : arg) if (ch >= 32 && ch < 127) input.chars.push_back(char32_t(ch)); }  // typed text (ASCII)
   else if (cmd == "key") input.keys.push_back(toInt(arg));                                                               // virtual-key code
-  else if (cmd == "click") { input.mx = float(toDouble(split(arg, ' ')[0])); input.my = float(toDouble(split(arg, ' ').back())); input.down[0] = input.pressed[0] = true; clickHeld = true; }
+  else if (cmd == "click") { input.mx = float(toDouble(split(arg, ' ')[0])); input.my = float(toDouble(split(arg, ' ').back())); input.down[0] = input.pressed[0] = true; g_clickHeld = true; }
   else if (cmd == "closepalette") paletteOpen = false;
-  else if (cmd == "inspector") inspectorOpen = arg != "off";
+  else if (cmd == "inspector") { inspectorOpen = arg != "off"; say(inspectorOpen ? (canInspect() ? "The inspector is open on the right." : "The inspector is switched on, but it only appears with a map or an open document preview.") : "The inspector is closed."); }
   else if (cmd == "hulls") { P->style.hulls = arg != "off"; styleDirty = true; }
   else if (cmd == "names") { P->style.clusterNames = arg != "off"; styleDirty = true; }
-  else if (cmd == "bundle") cmdBundles();
-  else if (cmd == "relayout") cmdRelayout();
+  else if (cmd == "bundle") { if (!hasMap()) say("There is no map."); else { cmdBundles(); say("Computing edge bundles\xE2\x80\xA6"); } }
+  else if (cmd == "relayout") { if (!hasMap()) say("There is no map."); else { cmdRelayout(); say("Running the layout again\xE2\x80\xA6"); } }
   else if (cmd == "run") {  // trigger analysis runs used by the pages
-    if (arg == "bursts") { bursts = detectBursts(P->corpus, Unit(trUnit), burstMin, burstS, burstG); burstsValid = true; }
-    else if (arg == "stability") { stab = clusterStability(P->net, P->params.clusterOpts(), stabRuns); stabValid = true; }
+    if (arg == "bursts") { if (!hasCorpus()) say("No records."); else { bursts = detectBursts(P->corpus, Unit(trUnit), burstMin, burstS, burstG); burstsValid = true; say(plural(long(bursts.size()), "burst") + " detected (Trends \xE2\x86\x92 Bursts)."); } }
+    else if (arg == "stability") { if (!hasMap()) say("There is no map."); else { stab = clusterStability(P->net, P->params.clusterOpts(), stabRuns); stabValid = true; say("Cluster stability computed (Analyse \xE2\x86\x92 Stability): mean agreement " + fmtFixed(stab.meanAri, 2) + "."); } }
+    else say("run bursts or run stability.");
   }
   else if (cmd == "expand") {
-    if (arg == "strategic") { mainChart.title = "Strategic diagram"; mainChart.make = [this](double w, double h, const ChartTheme& t) { if (!cinfoValid) { cinfo = clusterInfo(P->net, &P->corpus); cinfoValid = true; } return chartStrategic(cinfo, clusterColors(), w, h, t); }; mainChartOpen = true; }
+    if (arg == "strategic") {
+      if (!hasMap()) say("There is no map, so there is no strategic diagram.");
+      else { mainChart.title = "Strategic diagram"; mainChart.make = [this](double w, double h, const ChartTheme& t) { if (!cinfoValid) { cinfo = clusterInfo(P->net, &P->corpus); cinfoValid = true; } return chartStrategic(cinfo, clusterColors(), w, h, t); }; mainChartOpen = true; papersOpen = false; say("The strategic diagram fills the main area."); }
+    } else say("expand strategic is the only expand target; use show_chart / expandflow for other charts.");
   }
-  else if (cmd == "closechart") mainChartOpen = false;
-  else if (cmd == "svg" || cmd == "pdf" || cmd == "png") cmdExportFigure(cmd, arg);
-  else if (cmd == "viewsvg" || cmd == "viewpdf" || cmd == "viewpng") cmdExportCurrentView(cmd.substr(4), arg);
+  else if (cmd == "closechart") { say(mainChartOpen ? "The chart is closed; the map is shown again." : "No chart was open."); mainChartOpen = false; }
+  else if (cmd == "split") {  // split <0|1|2|3|off|cols|rows|4> [chart ids for the panes, "map" for the live map]
+    vector<string> a = splitAny(arg, " ,");
+    auto norm = [](string x) { x = lower(trim(x)); for (auto& c : x) if (c == ' ' || c == '-') c = '_'; if (startsWith(x, "live_")) x = "live:" + x.substr(5); return x; };
+    string m = a.empty() ? "1" : lower(a[0]);
+    int mode = m == "0" || m == "off" || m == "single" || m == "none" ? 0 : m == "1" || m == "cols" || m == "columns" || m == "side" ? 1 : m == "2" || m == "rows" ? 2 : m == "3" || m == "4" || m == "quad" || m == "four" ? 3 : -1;
+    if (mode < 0) say("split off | 1 (side by side) | 2 (above each other) | 4 (four panes) [chart ids...]");
+    else if (mode && !hasMap()) say("There is no map yet; build one first (the split view shows the map and charts side by side).");
+    else {
+      setSplit(mode);
+      int n = splitPanes();
+      for (size_t i = 1; i < a.size() && int(i) - 1 < n; i++) setSplitChart(int(i) - 1, norm(a[i]));
+      string what;
+      for (int i = 0; i < n; i++) what += (i ? ", " : "") + (splitChart[i] == "map" ? string("the live map") : replaceAll(splitChart[i], "_", " "));
+      say(mode ? "The main area shows " + std::to_string(n) + " panes: " + what + "." : "Single pane: the map alone.");
+    }
+  }
+  else if (cmd == "pane") {  // pane <1..4> <chart id|map>
+    vector<string> a = splitAny(arg, " ");
+    auto norm = [](string x) { x = lower(trim(x)); for (auto& c : x) if (c == ' ' || c == '-') c = '_'; if (startsWith(x, "live_")) x = "live:" + x.substr(5); return x; };
+    if (a.size() < 2) say("pane <1..4> <chart id | map | live:<view>>");
+    else if (splitMode == 0) say("The split view is off; use split first.");
+    else { int i = clampv(toInt(a[0], 1), 1, splitPanes()) - 1; setSplitChart(i, norm(a[1])); say("Pane " + std::to_string(i + 1) + " shows " + (splitChart[i] == "map" ? string("the live map") : replaceAll(splitChart[i], "_", " ")) + "."); }
+  }
+  else if (cmd == "svg" || cmd == "pdf" || cmd == "png") { if (!hasMap()) say("There is no map to export."); else if (arg.empty()) say("Give the file path."); else { cmdExportFigure(cmd, arg); bool ok = false; (void)readFileU(arg, &ok); say(ok ? "Wrote " + arg + "." : "The figure could not be written to " + arg + "."); } }
+  else if (cmd == "viewsvg" || cmd == "viewpdf" || cmd == "viewpng") { if (!hasMap()) say("There is no map to export."); else if (arg.empty()) say("Give the file path."); else { cmdExportCurrentView(cmd.substr(4), arg); say("Exporting the " + viewName(view) + " view to " + arg + "."); } }
   else if (cmd == "legend") showLegend = arg != "off";
   else if (cmd == "geofill") geoFill = clampv(toInt(arg, 0), 0, 2);
   else if (cmd == "geodenstyle") geoDenStyle = arg == "clusters" ? 1 : arg == "countries" ? 2 : arg == "heat" ? 0 : clampv(toInt(arg, 0), 0, 2);
@@ -2948,26 +4643,94 @@ void App::stepScript() {
     diffShowOnMap();
   }
   else if (cmd == "diffclear") diffClear();
+  else if (cmd == "compare") {
+    // compare periods a0 a1 b0 b1 | compare sources <a> <b> | compare thresholds <tA> <tB> | compare side|diff|off
+    auto v = splitAny(arg, " ,");
+    string k = v.empty() ? string() : lower(v[0]);
+    if (k == "side" || k == "sidebyside") { string err; if (compareShowSideBySide(&err)) say("Side by side: " + compareSummary() + "."); else say("Compare: " + err); }
+    else if (k == "diff" || k == "difference") { if (cmpKind == 2) say("Thresholds have no difference map."); else { diffCompute(); if (pdiff.ok) { diffShowOnMap(); say("Difference map shown: " + std::to_string(pdiff.counts[0]) + " appearing, " + std::to_string(pdiff.counts[1]) + " growing, " + std::to_string(pdiff.counts[2]) + " stable, " + std::to_string(pdiff.counts[3]) + " fading."); } else say("Compare: " + pdiff.error); } }
+    else if (k == "off" || k == "close") { compareClose(); diffClear(); say("Comparison closed."); }
+    else if (k == "periods" || k == "sources" || k == "thresholds") {
+      cmpKind = k == "periods" ? 0 : k == "sources" ? 1 : 2;
+      if (cmpKind == 0 && v.size() >= 5) { cmpA0 = toInt(v[1], 0); cmpA1 = toInt(v[2], 0); cmpB0 = toInt(v[3], 0); cmpB1 = toInt(v[4], 0); }
+      if (cmpKind == 1 && v.size() >= 3) { cmpFileA = clampv(toInt(v[1], 1) - 1, 0, std::max(0, int(P->corpus.files.size()) - 1)); cmpFileB = clampv(toInt(v[2], 2) - 1, 0, std::max(0, int(P->corpus.files.size()) - 1)); }
+      if (cmpKind == 2 && v.size() >= 3) { cmpThA = atof(v[1].c_str()); cmpThB = atof(v[2].c_str()); }
+      cmpValid = false; pdiffValid = false;
+      page = PG_TRENDS; trTab = 3;
+      if (cmpSideOpen) compareShowSideBySide();
+      say("Compare " + k + " set" + (hasMap() ? ": " + compareSummary() : string()) + ".");
+    } else say("Usage: compare periods a0 a1 b0 b1 | compare sources <a> <b> | compare thresholds <tA> <tB> | compare side|diff|off");
+  }
+  else if (cmd == "scope") {
+    // scope cluster <n> | scope off | scope link on|off
+    auto v = splitAny(arg, " ");
+    string k = v.empty() ? string() : lower(v[0]);
+    if (k == "cluster" && v.size() >= 2) {
+      int c = toInt(v[1], 0);
+      if (!hasMap() || c < 1 || c > P->net.nClusters) say("Cluster numbers run from 1 to " + std::to_string(hasMap() ? P->net.nClusters : 0) + ".");
+      else { focusCluster(c - 1); say(scopeActive() ? "Scope: " + scopeLabel_ + " \xC2\xB7 " + plural(long(scopeRecs_.size()), "record") + "." : linkScope ? "Cluster " + std::to_string(c) + " highlighted; it covers all records or the map has no record links." : "Cluster " + std::to_string(c) + " highlighted (linked selection is off)."); }
+    } else if (k == "off" || k == "clear") { clearScope(); say("Scope cleared."); }
+    else if (k == "link") { linkScope = v.size() < 2 || (v[1] != "0" && v[1] != "off"); settings.j.set("linkScope", linkScope); settings.save(); scopeActive(); say(string("Linked selection ") + (linkScope ? "on." : "off.")); }
+    else say(scopeActive() ? "Scope: " + scopeLabel_ + " \xC2\xB7 " + plural(long(scopeRecs_.size()), "record") + " of " + fmtInt(long(P->corpus.recs.size())) + "." : "No scope. Usage: scope cluster <n> | scope off | scope link on|off");
+  }
   else if (cmd == "mainpathroutes") mpRoutes = clampv(toInt(arg, 5), 0, 20);
   else if (cmd == "sweep") {
-    sweep = resolutionSweep(P->net, P->params.clusterOpts(), defaultSweepResolutions(), sweepSeeds);
-    sweepValid = true;
-    sweepSig = std::to_string(P->net.n()) + ":" + std::to_string(P->net.m()) + ":" + clusterTag(P->params.clusterOpts());
+    if (!hasMap()) say("There is no map.");
+    else {
+      sweep = resolutionSweep(P->net, P->params.clusterOpts(), defaultSweepResolutions(), sweepSeeds);
+      sweepValid = true;
+      sweepSig = std::to_string(P->net.n()) + ":" + std::to_string(P->net.m()) + ":" + clusterTag(P->params.clusterOpts());
+      string r;
+      for (auto& sw : sweep.pts) r += (r.empty() ? "" : "; ") + fmtNum(sw.resolution, 2) + " \xE2\x86\x92 " + plural(sw.clusters, "cluster") + " (agreement " + fmtFixed(sw.meanAri, 2) + ")";
+      if (sweep.best >= 0 && sweep.best < int(sweep.pts.size())) r += ". Suggested: " + fmtNum(sweep.pts[size_t(sweep.best)].resolution, 2);
+      say("Resolution sweep: " + r + ". Apply one with useres <r>.");
+    }
   }
-  else if (cmd == "useres") useResolution(toDouble(arg, 1.0));
+  else if (cmd == "useres") { useResolution(toDouble(arg, 1.0)); say("Re-clustered at resolution " + arg + ": " + plural(P->net.nClusters, "cluster") + "."); }
   else if (cmd == "livingcheck") livingCheck(false);
   else if (cmd == "livingadd") livingAdd(arg == "rebuild");
   else if (cmd == "livingauto") { P->living.set("auto", toInt(arg, 1) != 0); P->dirty = true; }
   else if (cmd == "livingsince") P->living.set("lastCheck", arg);  // tests: pretend the last check was on this date
   else if (cmd == "geolayer") geoLayerKind = arg == "overlay" ? 1 : arg == "density" ? 2 : arg == "network" ? 0 : clampv(toInt(arg, 0), 0, 2);
-  else if (cmd == "geosel") { geoUpdate(); geoSel = findCountry(arg); if (geoSel >= 0) { closeDoc(); inspectorOpen = true; } }
-  else if (cmd == "preview") {
+  else if (cmd == "geosel") { geoUpdate(); geoSel = findCountry(arg); if (geoSel >= 0) { closeDoc(); inspectorOpen = true; } say(geoSel >= 0 || arg == "none" ? "Country selection: " + arg + "." : "No country named \"" + arg + "\"."); }
+  else if (cmd == "preview") {  // preview <n> (0-based record number) | R<n> (the ids of read_papers, 1-based) | top | -1
     int r = -1;
-    if (arg == "top") { long best = -1; for (size_t i = 0; i < P->corpus.recs.size(); i++) if (P->corpus.recs[i].cites > best) { best = P->corpus.recs[i].cites; r = int(i); } }
-    else r = toInt(arg, -1);
-    if (r >= 0) openDoc(r); else closeDoc();
+    string a = lower(trim(arg));
+    if (a == "top") { long best = -1; for (size_t i = 0; i < P->corpus.recs.size(); i++) if (P->corpus.recs[i].cites > best) { best = P->corpus.recs[i].cites; r = int(i); } }
+    else if (!a.empty() && a[0] == 'r' && toInt(a.substr(1), 0) > 0) r = toInt(a.substr(1), 0) - 1;
+    else r = toInt(a, -1);
+    if (a.empty() || a == "-1" || a == "off" || a == "close") { closeDoc(); say("The document preview is closed."); }
+    else if (!hasCorpus()) say("No records are loaded, so there is nothing to preview.");
+    else if (r < 0 || size_t(r) >= P->corpus.recs.size()) say("There is no record " + arg + " (the records are R1 to R" + std::to_string(P->corpus.recs.size()) + ").");
+    else {
+      openDoc(r);
+      const Record& d = P->corpus.recs[size_t(r)];
+      say("Preview of R" + std::to_string(r + 1) + " is open in the inspector on the right: " + truncate(trim(d.title), 90) + (d.year ? " (" + std::to_string(d.year) + ")" : string()) + ".");
+    }
   }
-  else if (cmd == "maps") restoreMap(toInt(arg, 0));
+  else if (cmd == "papers") {  // papers [off | <filter words>] — the papers table in the main area
+    if (arg == "off" || arg == "0") { papersOpen = false; say("The papers table is closed."); }
+    else if (!hasCorpus()) say("No records are loaded, so there is no papers table to show.");
+    else { openPapers(arg == "on" || arg == "1" ? string() : arg); say(papersSummary(0)); }
+  }
+  else if (cmd == "writer") {  // writer [on|off|pdf|docx|html|all|compile|preview|openpdf [path]] — the document editor / exports
+    string a = lower(trim(arg)), rest;
+    size_t sp = a.find(' ');
+    if (sp != string::npos) { rest = trim(arg.substr(sp + 1)); a = a.substr(0, sp); }
+    if (a == "off" || a == "0" || a == "close") { closeWriter(); say("The writer is closed."); }
+    else if (a == "compile" || a == "recompile") {
+      if (writerPdfCompileBusy_) say("A Writer LaTeX compile is already in progress.");
+      else if (busy()) say(jobLabel + " is still running.");
+      else if (wdoc.empty()) say("Add content to the document before compiling a PDF.");
+      else { writerCompileLatex(); say(writerPdfCompileBusy_ ? "Compiling the Writer's LaTeX preview." : "The LaTeX preview could not be started."); }
+    }
+    else if (a == "preview") { bool on = rest.empty() ? !writerPdfPreviewOpen_ : lower(rest) != "off" && rest != "0"; writerSetPdfPreview(on); say(on ? "The PDF preview is shown beside the document." : "The PDF preview is hidden."); }
+    else if (a == "openpdf") { if (writerOpenPdfSeparately()) say("Opening the latest compiled PDF in the system viewer."); }
+    else if (a == "pdf" || a == "docx" || a == "word" || a == "html") { string pth = writerExport(a == "word" ? "docx" : a, rest.empty() ? reportsDir() + "\\" + writerSlug() + "." + (a == "word" ? "docx" : a) : rest); say(pth.empty() ? "The document could not be exported." : "Exported the document as " + pth + "."); }
+    else if (a == "all") { string base = rest.empty() ? reportsDir() + "\\" + writerSlug() : rest; string p1 = writerExport("pdf", base + ".pdf"), p2 = writerExport("docx", base + ".docx"), p3 = writerExport("html", base + ".html"); say(p1.empty() && p2.empty() && p3.empty() ? "The document could not be exported." : "Exported " + join(vector<string>{p1, p2, p3}, ", ") + "."); }
+    else { openWriter(); say(wdoc.empty() ? "The writer is open with an empty document." : "The writer is open: " + writerSummary() + "."); }
+  }
+  else if (cmd == "maps") { restoreMap(toInt(arg, 0)); say("Map " + arg + " of the history is shown (" + plural(long(mapHistory.size()), "map") + " in the history)."); }
   else if (cmd == "scroll") { if (arg.rfind("insp", 0) == 0) ui.scrollTo("inspector", float(toDouble(split(arg, ' ').back()))); else if (page >= 0) ui.scrollTo("page" + std::to_string(page), float(toDouble(arg))); }
   else if (cmd == "popup") ui.openPopup(arg);
   else if (cmd == "docrank") docRank = clampv(toInt(arg, 0), 0, 2);
@@ -2975,7 +4738,43 @@ void App::stepScript() {
   else if (cmd == "oaquery") oaQuery = replaceAll(arg, " | ", "\n");
   else if (cmd == "oamax") oaMax = arg;
   else if (cmd == "oafrom") oaFrom = arg;
-  else if (cmd == "oafetch") { oaKind = 0; cmdOpenAlex(); }
+  else if (cmd == "oafetch") { oaKind = 0; cmdOpenAlex(); say(busy() ? "Searching OpenAlex\xE2\x80\xA6" : (lastJobError.empty() ? "The search did not start (is a query set?)." : lastJobError)); }
+  else if (cmd == "getpdf") {  // getpdf [all|R3,R7] [retry]
+    if (!hasCorpus()) say("No records loaded.");
+    else {
+      vector<string> toks = splitAny(lower(arg), " ,;");
+      bool retry = false;
+      vector<int> among;
+      for (auto& x : toks) {
+        if (x == "retry") retry = true;
+        else if (x.size() > 1 && x[0] == 'r' && isdigit(uint8_t(x[1]))) { int rec = toInt(x.substr(1), 0) - 1; if (rec >= 0 && size_t(rec) < P->corpus.recs.size()) among.push_back(rec); }
+      }
+      if (among.empty()) for (size_t i = 0; i < P->corpus.recs.size(); i++) among.push_back(int(i));
+      vector<int> cands;
+      for (int rec : among) {
+        const Record& r = P->corpus.recs[size_t(rec)];
+        if (fetchRecordHasFile(rec) || oa::normDoi(r.doi).empty()) continue;
+        auto f = P->library.fetch.find(PdfLibrary::keyOf(r));
+        if (!retry && f != P->library.fetch.end() && f->second.needsFile()) continue;
+        cands.push_back(rec);
+      }
+      if (cands.empty()) say("Nothing to fetch. " + fetchSummary());
+      else if (fetchPdfs(cands)) say("Getting " + plural(long(cands.size()), "PDF") + "\xE2\x80\xA6");
+      else say(lastJobError.empty() ? string("The download did not start.") : lastJobError);
+    }
+  }
+  else if (cmd == "rdview") {  // rdview one|two|cover|turn|turnback|upright|print  (the open PDF's view)
+    const string v = lower(trim(arg));
+    if (!readerOpen && v != "one" && v != "two" && v != "cover") say("No PDF is open in the reader.");
+    else if (v == "one") readerSetLayout(false, readerCoverAlone());
+    else if (v == "two") readerSetLayout(true, readerCoverAlone());
+    else if (v == "cover") readerSetLayout(true, !readerCoverAlone());
+    else if (v == "turn") readerRotate(1);
+    else if (v == "turnback") readerRotate(-1);
+    else if (v == "upright") readerRotate(-readerRotation());
+    else if (v == "print") readerPrintDialog();
+    else say("rdview one|two|cover|turn|turnback|upright|print");
+  }
   else if (cmd == "start") showStart = arg != "0";
   else if (cmd == "ai") {  // ai <task-id> [extra text]
     string id = parts.size() > 1 ? parts[1] : "chat";
@@ -2984,7 +4783,7 @@ void App::stepScript() {
     for (auto& ti : ai::tasks()) if (id == ti.id) { if (ti.task == ai::Task::Chat) { page = PG_AI; aiSend(ai::Task::Chat, extra); } else aiRun(ti.task, extra); }
   }
   else if (cmd == "aiinput") { aiInput = arg; }
-  else if (cmd == "settab") { setTab = clampv(toInt(arg, 0), 0, 2); }
+  else if (cmd == "settab") { setTab = clampv(toInt(arg, 0), 0, 3); }
   else if (cmd == "aiconfig") {  // aiconfig <provider 0-3> <model> <base url> [key]
     int pv = parts.size() > 1 ? clampv(toInt(parts[1], 0), 0, 3) : 3;
     settings.j.set("aiProvider", pv);
@@ -2998,8 +4797,8 @@ void App::stepScript() {
   }
   else if (cmd == "aiwait") { if (aiLive) { scriptPos--; scriptWait = 5; } }
   // records flow
-  else if (cmd == "expandflow") { mainChart.title = "Records flow"; mainChart.make = [this](double w, double h, const ChartTheme& t) { return chartFlow(recordsFlow(), w, h, t); }; mainChartOpen = true; }
-  else if (cmd == "flowsvg") writeFileU(arg, toSVG(chartFlow(recordsFlow(), 520, 560, chartTheme(true))));
+  else if (cmd == "expandflow") { if (!hasCorpus()) say("No records are loaded."); else { mainChart.title = "Records flow"; mainChart.make = [this](double w, double h, const ChartTheme& t) { return chartFlow(recordsFlow(), w, h, t); }; mainChartOpen = true; papersOpen = false; say("The records flow diagram fills the main area."); } }
+  else if (cmd == "flowsvg") { Scene sc = chartFlow(recordsFlow(), 520, 560, chartTheme(true)); string err; bool ok = !arg.empty() && hybridizeForExport(g, P->fig, sc, &err) && writeFileU(arg, toSVG(sc)); say(ok ? "Wrote the records-flow diagram to " + arg + "." : (err.empty() ? "Could not write " + arg + "." : err)); }
   // clean terms
   else if (cmd == "cleanunit") { cleanUnit = clampv(toInt(arg, 0), 0, int(cleanUnits().size()) - 1); variantsScanned = false; }
   else if (cmd == "cleanscan") cleanScan();
@@ -3026,9 +4825,37 @@ void App::stepScript() {
   else if (cmd == "agentapprove") agentApprove(arg != "no", arg == "all");
   else if (cmd == "agentundo") agentUndoChanges();
   else if (cmd == "agentauto") { settings.j.set("agentAuto", arg == "1"); }
+  // live AI
+  else if (cmd == "live") { liveOpen(false); if (!arg.empty()) liveSend(arg); }
+  else if (cmd == "livemic") { if (arg == "off") { if (live.s && live.talk) liveToggleMic(); } else liveOpen(true); }
+  else if (cmd == "livewait") { if (liveBusy()) { scriptPos--; scriptWait = 5; } }
+  else if (cmd == "liveapprove") liveApprove(arg != "no", arg == "all");
+  else if (cmd == "liveallow") live.allowAll = arg != "0";
+  else if (cmd == "livestop") liveDisconnect(false);
+  else if (cmd == "livevad") {  // speech detection by the app (activityStart/End) or by the server; a voice session reconnects with the new setup
+    bool on = arg.empty() ? !settings.j["liveClientVad"].boolean(true) : (arg != "0" && arg != "off" && arg != "server");
+    settings.j.set("liveClientVad", on); settings.save(); setLiveVad = on;
+    if (live.s && live.phase > 0 && live.audioMode) liveConnect(true);
+    say(string("Speech detection: ") + (on ? "the app tells the model when you stop talking." : "the server's own detection."));
+  }
+  else if (cmd == "cite") { cmdCite(); say("APA and BibTeX references copied to the clipboard."); }
+  else if (cmd == "themeanim") {  // the circular theme reveal on / off (scripts themselves always switch instantly)
+    bool on = arg.empty() ? !settings.j["themeReveal"].boolean(true) : (arg != "0" && arg != "off");
+    settings.j.set("themeReveal", on); settings.save();
+    say(string("Theme reveal ") + (on ? "on." : "off."));
+  }
+  else if (cmd == "liveclose") liveClose();
+  else if (cmd == "livemini") { if (!live.open) liveOpen(arg != "off"); liveSetMini(arg != "off"); }
+  else if (cmd == "livelog") {
+    string o = readFileU("script.log");
+    o += "live open=" + std::to_string(live.open) + " phase=" + std::to_string(live.phase) + " audio=" + std::to_string(live.audioMode) + " talk=" + std::to_string(live.talk) +
+         " tool=" + std::to_string(live.toolRunning) + " queue=" + std::to_string(live.queue.size()) + " changes=" + std::to_string(live.changes) + " status=" + liveStatus() + "\n";
+    o += live.log.plain();
+    writeFileU("script.log", o);
+  }
   else if (cmd == "agentlog") {
     string o = readFileU("script.log");
-    o += "agent active=" + std::to_string(agent.active) + " waiting=" + std::to_string(agent.waitApproval) + " steps=" + std::to_string(agent.steps) + " changes=" + std::to_string(agent.changes) + " undo=" + std::to_string(agentUndo.valid) + "\n";
+    o += "agent active=" + std::to_string(agent.active) + " waiting=" + std::to_string(agent.waitApproval) + " steps=" + std::to_string(agent.steps) + " changes=" + std::to_string(agent.changes) + " undo=" + std::to_string(agentUndos.size()) + "\n";
     for (auto& st : agent.log) o += "  [" + std::to_string(st.status) + "] " + st.title + (st.detail.empty() ? string() : " : " + st.detail) + "\n";
     if (!agent.active && !agent.final.empty()) o += "  final: " + replaceAll(truncate(agent.final, 300), "\n", " / ") + "\n";
     if (!agentReportPath.empty()) o += "  report: " + agentReportPath + "\n";
@@ -3038,16 +4865,17 @@ void App::stepScript() {
   else if (cmd == "oakind") oaKind = clampv(std::atoi(arg.c_str()), 0, 1);
   else if (cmd == "oasem") oaSemStrategy = clampv(std::atoi(arg.c_str()), 0, 1);
   else if (cmd == "oasemq") { oaSemQueries = split(arg, '|'); for (auto& q : oaSemQueries) q = trim(q); if (oaSemQueries.empty()) oaSemQueries = {""}; }
-  else if (cmd == "records") { string f = split(arg, ' ')[0], pth = arg.substr(std::min(arg.size(), f.size() + 1)); writeFileU(pth, writeRecords(P->corpus.recs, f == "ris" ? RecordExport::RIS : f == "csv" ? RecordExport::CSV : RecordExport::WoS)); }
-  else if (cmd == "figopt") {  // figopt transparent|pdfpages 0|1
+  else if (cmd == "records") { string f = split(arg, ' ')[0], pth = arg.substr(std::min(arg.size(), f.size() + 1)); bool ok = !pth.empty() && writeFileU(pth, writeRecords(P->corpus.recs, f == "ris" ? RecordExport::RIS : f == "csv" ? RecordExport::CSV : (f == "bib" || f == "bibtex") ? RecordExport::BibTeX : RecordExport::WoS)); say(ok ? "Wrote " + plural(long(P->corpus.recs.size()), "record") + " to " + pth + "." : "Could not write the records (records wos|ris|bib|csv <file>)."); }
+  else if (cmd == "figopt") {  // figopt transparent|pdfpages|hybrid 0|1
     auto sp = arg.find(' ');
     string k = arg.substr(0, sp);
     bool v = sp != string::npos && arg.substr(sp + 1) == "1";
     if (k == "transparent") P->fig.transparent = v;
     else if (k == "pdfpages") P->fig.pdfPages = v;
+    else if (k == "hybrid") P->fig.hybridExport = v;
     else if (k == "halo") { P->style.labelHalo = v; styleDirty = true; }
   }
-  else if (cmd == "chartspdf") cmdExportChartsPdf(pageCharts, arg);
+  else if (cmd == "chartspdf") { if (arg.empty()) say("Give the file path."); else { cmdExportChartsPdf(pageCharts, arg); say(pageCharts.empty() ? "No charts are displayed on the current page; open the page and tab first." : "Wrote " + plural(long(pageCharts.size()), "chart") + " to " + arg + "."); } }
   else if (cmd == "figpanels") {  // figpanels all | network,overlay,density,timeline,geo,3d,matrix
     auto& F = P->fig;
     bool all = arg == "all";
@@ -3055,17 +4883,19 @@ void App::stepScript() {
     F.panelNetwork = has("network"); F.panelOverlay = has("overlay"); F.panelDensity = has("density"); F.panelTimeline = has("timeline");
     F.panelGeo = has("geo") && geoAvailable(); F.panel3D = has("3d"); F.panelMatrix = has("matrix");
   }
-  else if (cmd == "figzoom") { figZoomOpen = arg != "off"; figZoomK = 1; figZoomX = figZoomY = 0; }
-  else if (cmd == "save") { string err; mapsToProject(); if (P->save(arg, &err)) { P->path = arg; P->dirty = false; } }
-  else if (cmd == "openproj") cmdOpenProject(arg);
-  else if (cmd == "shot") { pendingShot = true; pendingViewCrop = false; pendingShotPath = arg; }
-  else if (cmd == "viewshot") { pendingShot = true; pendingViewCrop = true; pendingShotPath = arg; }
+  else if (cmd == "figzoom") { if (arg != "off" && !hasMap()) say("There is no map, so there is no figure to zoom."); else { figZoomOpen = arg != "off"; figZoomK = 1; figZoomX = figZoomY = 0; say(figZoomOpen ? "The publication figure is shown full-screen (Esc closes it)." : "The figure zoom is closed."); } }
+  else if (cmd == "save") { string err; mapsToProject(); writerToProject(); if (P->save(arg, &err)) { P->path = arg; P->dirty = false; settings.addRecent(arg); say("Saved the project as " + arg + "."); } else say("Could not save " + arg + ": " + err); }
+  else if (cmd == "openproj") { bool ok = false; (void)readFileU(arg, &ok); if (!ok) say("Cannot read " + arg + "."); else { cmdOpenProject(arg); say(P->path == arg ? "Opened the project " + fileName(arg) + ": " + plural(long(P->corpus.recs.size()), "record") + ", " + plural(P->net.n(), "item") + "." : "The project could not be opened."); } }
+  else if (cmd == "shot") { pendingShot = true; pendingViewCrop = false; pendingShotPath = arg; say("Screenshot of the window to " + arg + "."); }
+  else if (cmd == "viewshot") { pendingShot = true; pendingViewCrop = true; pendingShotPath = arg; say("Screenshot of the canvas to " + arg + "."); }
   else if (cmd == "wait") scriptWait = toInt(arg, 10);
   else if (cmd == "zoom") { camTargetZoom = -1; nv.cam.zoom *= toDouble(arg, 1); }
   else if (cmd == "orbit") { nv.cam.yaw += float(toDouble(arg, 0.5)); }
-  else if (cmd == "log") { string o = readFileU("script.log"); o += line + " | items=" + std::to_string(P->net.n()) + " links=" + std::to_string(P->net.m()) + " clusters=" + std::to_string(P->net.nClusters) + " Q=" + fmtFixed(P->last.Q, 3) + " records=" + std::to_string(P->corpus.recs.size()) + " labels=" + std::to_string(nv.labelsShown) + " gpu=" + g.adapter + "\n"; writeFileU("script.log", o); }
+  else if (cmd == "log") { string o = readFileU("script.log"); o += line + " | items=" + std::to_string(P->net.n()) + " links=" + std::to_string(P->net.m()) + " clusters=" + std::to_string(P->net.nClusters) + " Q=" + fmtFixed(P->last.Q, 3) + " records=" + std::to_string(P->corpus.recs.size()) + " labels=" + std::to_string(nv.labelsShown) + " gpu=" + g.adapter + " canvascache=" + std::to_string(canvasHits) + "/" + std::to_string(canvasHits + canvasMisses) + " textcache=" + std::to_string(ui.textHitsPrev) + "/" + std::to_string(ui.textHitsPrev + ui.textMissesPrev) + "/" + std::to_string(ui.textCacheSize()) + " mem=" + fmtNum(processWorkingSetMB(), 0) + "MB\n"; writeFileU("script.log", o); canvasHits = canvasMisses = 0; }
   else if (cmd == "quit") { if (P) P->dirty = false; PostMessageW(hwnd, WM_CLOSE, 0, 0); scriptMode = false; }
+  else { needFrame = true; return false; }
   needFrame = true;
+  return true;
 }
 
 }  // namespace win

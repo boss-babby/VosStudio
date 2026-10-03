@@ -126,7 +126,8 @@ int main() {
     CHECK(!parseSearchPlan("sorry", sp));
     CHECK(taskPrompt(Task::NameClusters, "").find("JSON array") != string::npos);
     CHECK(taskPrompt(Task::Search, "LLM tutoring").find("LLM tutoring") != string::npos);
-    CHECK(tasks().size() == size_t(Task::Count));
+    CHECK(tasks().size() + 1 == size_t(Task::Count));  // every task except Agent (not a one-click task) has a card
+    CHECK(taskInfo(Task::Agent).task == Task::Agent && string(taskInfo(Task::Clean).id) == "clean");
   }
   // ---- context from the sample project, persistence
   {

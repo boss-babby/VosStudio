@@ -1,5 +1,7 @@
 // VOSStudio Native — immediate-mode UI toolkit on Direct2D/DirectWrite
 #pragma once
+#include <unordered_map>
+#include <array>
 #include "netview.h"
 
 namespace vs {
@@ -13,7 +15,10 @@ struct Input {
   float mx = -1, my = -1;
   bool down[3] = {false, false, false}, pressed[3] = {false, false, false}, released[3] = {false, false, false};
   bool dbl = false;
-  float wheel = 0;
+  bool touch = false;       // this frame came from a Windows touch contact
+  bool touchCancel = false; // a second contact cancelled the primary one-finger tap/drag
+  float pinch = 0;           // pinch zoom, in wheel-like notches (positive = zoom in)
+  float wheel = 0, hwheel = 0;  // notches; hwheel > 0 = right (a touchpad's sideways swipe, a tilt wheel)
   std::u32string chars;
   vector<int> keys;  // VK codes pressed this frame
   bool ctrl = false, shift = false, alt = false;
@@ -40,8 +45,14 @@ class Ui {
 
   void init(Gfx& gfx, HWND h);
   void setTheme(bool darkTheme);
-  void beginFrame(const Input& input, double t);
+  static UiColors palette(bool darkTheme);  // the colours of either theme (the theme reveal paints with the old one)
+  // partial = an overlay-only frame (the Live pop-up redrawn over the cached window): the base layer is not
+  // drawn, so the caption hit test keeps the widget rects of the last full frame (see widgetAt)
+  void beginFrame(const Input& input, double t, bool partial = false);
+  void fullFrameAfterAll() { partial_ = false; hitRects_.clear(); }  // a frame begun as partial is drawn in full after all
   void endFrame();  // draws popups, tooltips, toasts
+  uint64_t hoverTargetAt(float x, float y) const;  // last-frame hit map; lets WM_MOUSEMOVE skip unchanged hover targets
+  double wakeAt = 0;  // next one-shot UI wake (e.g. delayed tooltip); 0 means none
 
   // drawing
   ID2D1DeviceContext* dc() const { return g->dc.get(); }
@@ -66,8 +77,8 @@ class Ui {
   // interaction
   bool mouseIn(const Rect& r) const;
   bool behave(uint64_t id, const Rect& r, bool* hovered = nullptr, bool* held = nullptr);  // returns clicked
-  void tip(const string& t) { if (hot == lastId_) tipNext_ = t; }
-  void tipFor(uint64_t idv, const string& t) { if (hot == idv) tipNext_ = t; }
+  void tip(const string& t) { if (hotNext_ == lastId_) tipNext_ = t; }
+  void tipFor(uint64_t idv, const string& t) { if (hotNext_ == idv) tipNext_ = t; }
   // immediate tooltip card at the mouse (first line bold) — chart data points, map hover
   bool wantsCaret = false;  // a text field has focus this frame (caret blink)
   void richTip(const string& t) { richTip_ = t; richBold_ = true; }
@@ -95,6 +106,7 @@ class Ui {
   // Wrapped text with inline Markdown: **bold**, *italic*, `code`. Returns the height.
   float richText(const Rect& r, const string& md, float size, const Color& col, int weight = 400, bool draw = true, float lineSpacing = 1.35f);
   void scrollSet(const string& key, float y);  // jump a root-level scroll area (no animation); y is clamped
+  float scrollGet(const string& key) const;   // current offset of a root-level scroll area (0 when unknown)
   bool numberInput(const Rect& r, const string& key, int& v, int lo, int hi, int step = 1);
   bool numberInputD(const Rect& r, const string& key, double& v, double lo, double hi, double step, int dec);
   bool header(const Rect& r, const string& title, bool& open, const string& badge = "");
@@ -120,7 +132,15 @@ class Ui {
   bool maskNext = false;  // the next textInput shows its text masked while not being edited (API keys)
   void popupRect(const Rect& r) { popupRectNext_ = r; }  // mark area owned by the popup this frame
   bool inOverlay() const { return inOverlay_; }
+  bool hasClip() const { return !clips_.empty(); }
+  Rect activeClip() const { return clips_.empty() ? Rect{} : clips_.back(); }
+  // a floating panel (the Live AI pop-up) owns this area for the rest of the frame: base-layer widgets, scroll areas
+  // and the canvas under it ignore the mouse; the panel calls unblock() before drawing its own widgets
+  void block(const Rect& r) { blockRect_ = r; }
+  void unblock() { blockRect_ = {-1, -1, 0, 0}; }
+  bool blocked(float x, float y) const { return !inOverlay_ && blockRect_.w > 0 && blockRect_.has(x, y); }
   bool anyPopup() const { return popup_ != 0; }
+  bool tipShowing() const { return !tipNext_.empty() && hot && !in.down[0] && time - hotSince_ > 0.45; }  // a tooltip is drawn at the end of this frame
 
   // scroll areas
   void beginScroll(const string& key, const Rect& r);
@@ -140,17 +160,22 @@ class Ui {
 
   // text editing state (public so the app can know whether a field has focus)
   bool editing() const { return focus != 0; }
+  void focusText(uint64_t idv, const string& current);  // give a text input the caret (with its current text) from outside
 
  private:
+  struct HoverHit { uint64_t id = 0; Rect r, clip; bool clipped = false, overlay = false, modal = false; };
+  vector<HoverHit> hoverHits_, hoverBase_;
+  void recordHover(uint64_t id, const Rect& r);
+  bool touchHit(uint64_t id, const Rect& r) const;  // expands sparse targets without stealing a neighbouring control
   vector<uint64_t> idStack_;
   vector<Rect> clips_;
-  uint64_t lastId_ = 0, hotNext_ = 0, popup_ = 0;
+  uint64_t lastId_ = 0, hotNext_ = 0, popup_ = 0, touchTargetId_ = 0;
   double popupOpenedAt_ = 0;
   vector<std::pair<std::function<void()>, bool>> overlays_;  // (draw fn, queued from the modal layer)
   uint64_t modal_ = 0;
   bool modalLayer_ = false;
   bool inOverlay_ = false;
-  Rect popupRectPrev_{-1, -1, 0, 0}, popupRectNext_{-1, -1, 0, 0};
+  Rect popupRectPrev_{-1, -1, 0, 0}, popupRectNext_{-1, -1, 0, 0}, blockRect_{-1, -1, 0, 0};
   string tipNext_, tipCur_, richTip_;
   bool richBold_ = false;
   uint64_t tipId_ = 0;
@@ -158,9 +183,16 @@ class Ui {
   struct Scroll { uint64_t id; Rect r; float y; };
   vector<Scroll> scrollStack_;
   vector<Rect> hitRects_, hitPrev_;  // interactive rects of the root layer (window caption hit testing)
+  vector<Rect> hitBase_;             // rects of the last full frame (kept through overlay-only frames)
+  bool partial_ = false;
+  uint64_t hotKeep_ = 0;
+  string tipKeep_;
   std::map<uint64_t, std::pair<float, float>> scroll_;  // id -> (y, contentH)
   std::map<uint64_t, float> scrollTarget_;
   float wheelLeft_ = 0;
+  uint64_t touchScrollId_ = 0;
+  float touchScrollStartY_ = 0, touchScrollLastY_ = 0;
+  bool touchScrollMoved_ = false;
   // editing
   std::u32string ebuf_;
   int caret_ = 0, anchor_ = 0;
@@ -170,6 +202,28 @@ class Ui {
   std::map<string, Com<ID2D1PathGeometry>> icons_;
   ID2D1PathGeometry* iconGeo(const string& name);
   Com<IDWriteTextLayout> mkLayout(const string& t, float size, int weight, bool mono, float maxW = 100000);
+  // Text layout cache. DirectWrite shaping is the costly part of drawing a string; a panel draws hundreds per frame
+  // and they hardly change, so finished layouts are kept for a while, keyed by text, font, box and alignment.
+  struct TextEntry {
+    Com<IDWriteTextLayout> L;
+    float w = 0, h = 0;                       // metrics
+    vector<std::array<float, 4>> boxes;       // rich text: code-span backgrounds (relative to the origin)
+    uint32_t seen = 0;                        // frame of the last use
+  };
+  std::unordered_map<uint64_t, TextEntry> textCache_;
+  std::map<uint64_t, Com<IDWriteInlineObject>> ellipsis_;  // trimming signs per format
+  uint32_t frameNo_ = 0;
+  TextEntry* textLookup(uint64_t key);      // nullptr when absent or the cache is off
+  TextEntry& textStore(uint64_t key, TextEntry&& e);
+  void textSweep();                          // drops layouts not used for a while
+  static uint64_t textKey(int kind, const string& t, float size, int weight, bool mono, float w, float h, int extra);
+  IDWriteInlineObject* ellipsisFor(float size, int weight, bool mono);
+ public:
+  bool textCacheOn = true;                   // setting "textCache" (script: textcache 0|1)
+  uint32_t textHits = 0, textMisses = 0;     // this frame (performance overlay)
+  uint32_t textHitsPrev = 0, textMissesPrev = 0;  // previous frame
+  size_t textCacheSize() const { return textCache_.size(); }
+  void textCacheClear() { textCache_.clear(); ellipsis_.clear(); }
 };
 
 // Vertical layout helper

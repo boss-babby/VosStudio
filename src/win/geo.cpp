@@ -49,7 +49,8 @@ void App::geoEnsureWorld() {
 }
 
 string App::geoSig() const {
-  string s = std::to_string(uintptr_t(P.get())) + ":" + std::to_string(P->corpus.recs.size()) + ":" + std::to_string(P->corpus.files.size());
+  string s = std::to_string(uintptr_t(P.get())) + ":cv" + std::to_string(P->corpusVersion) + ":" + std::to_string(P->corpus.recs.size()) + ":" + std::to_string(P->corpus.files.size()) +
+             ":map" + std::to_string(reinterpret_cast<uintptr_t>(P->net.nodes.data())) + ":" + std::to_string(P->net.n()) + ":sc" + std::to_string(scopeRecs_.empty() ? 0 : scopeVer_);
   if (!P->corpus.recs.empty()) s += P->corpus.recs.front().title.substr(0, 20) + P->corpus.recs.back().title.substr(0, 20);
   if (hasMap()) s += "|" + std::to_string(P->net.n()) + ":" + std::to_string(P->net.m()) + ":" + (P->net.n() ? P->net.nodes[0].label : string());
   return s;
@@ -74,7 +75,7 @@ void App::geoUpdate() const {
   std::map<std::pair<int, int>, int> pairs;
   geoDocsMax = 0;
   geoDocsTotal = 0;
-  for (auto& r : P->corpus.recs) {
+  for (auto& r : (scopeRecs_.empty() ? P->corpus : scopeC_).recs) {  // linked selection: statistics of the scoped records
     std::set<int> cs;
     for (auto& c : r.countries) { int k = findCountry(c); if (k >= 0) cs.insert(k); }
     if (cs.empty()) continue;
@@ -117,6 +118,7 @@ void App::geoUpdate() const {
   if (geoPairs.size() > 150) geoPairs.resize(150);
   geoPairMax = geoPairs.empty() ? 1 : std::get<2>(geoPairs[0]);
   geoModeA = hasMap() && ok >= std::max(2, P->net.n() / 3);
+  invalidateFlags();  // country-node visibility changed with the rebuilt geo index
 }
 
 bool App::geoAvailable() const {
@@ -140,7 +142,7 @@ static inline void geoW2S(const NetView& nv, float wx, float wy, float& sx, floa
 // ------------------------------------------------------------------ layer description (shared by screen and export)
 Color App::geoLand(const Theme& th) const { return th.light ? Color::hex(0xdfe3e9) : Color::hex(0x2a303a); }
 
-void App::geoLayer(const Theme& th, vector<GeoFill>& fills, vector<GeoBubble>& bubbles, vector<GeoArc>& arcs) const {
+void App::geoLayer(const Theme& th, vector<GeoFill>& fills, vector<GeoBubble>& bubbles, vector<GeoArc>& arcs, const NetView& v) const {
   int mode = geoMode();
   int nC = worldCountryCount();
   Color land = geoLand(th);
@@ -162,7 +164,7 @@ void App::geoLayer(const Theme& th, vector<GeoFill>& fills, vector<GeoBubble>& b
     return land.mix(simulateCvd(cmapAt(P->style.densityScheme, 0.1 + 0.9 * shadeT[size_t(c)]), P->style.cvd), 0.92f);
   };
   if (mode == 1) {
-    const Encoder& e = nv.enc();
+    const Encoder& e = v.enc();
     for (int i = 0; i < P->net.n() && i < int(geoNodeCountry.size()); i++) {
       int c = geoNodeCountry[size_t(i)];
       if (c < 0) continue;
@@ -172,7 +174,7 @@ void App::geoLayer(const Theme& th, vector<GeoFill>& fills, vector<GeoBubble>& b
       else if (geoLayerKind == 1) col = land.mix(e.nodeColor(i, ViewKind::Overlay), float(0.35 + 0.4 * t));
       else if (geoFill == 0) col = land.mix(e.clusterColor(P->net.nodes[size_t(i)].cluster), float(0.22 + 0.38 * t));
       else if (geoFill == 1) col = land.mix(cmapAt(P->style.scheme, 0.1 + 0.9 * t), 0.75f);
-      if (!geoFig_ && i < int(nv.flags.size()) && (nv.flags[size_t(i)] & NF_DIM)) col = land.mix(col, 0.35f);
+      if (!geoFig_ && i < int(v.flags.size()) && (v.flags[size_t(i)] & NF_DIM)) col = land.mix(col, 0.35f);
       fills[size_t(c)] = {col, true};
     }
   } else if (mode == 2) {
@@ -197,7 +199,7 @@ void App::geoLayer(const Theme& th, vector<GeoFill>& fills, vector<GeoBubble>& b
       }
       fills[size_t(c)] = {col, true};
     }
-    double zf = geoFig_ ? 1.0 : clampv(std::sqrt(nv.cam.zoom / std::max(1e-9, nv.fitZoom())), 1.0, 3.0);
+    double zf = geoFig_ ? 1.0 : clampv(std::sqrt(v.cam.zoom / std::max(1e-9, v.fitZoom())), 1.0, 3.0);
     Color bc = Color::hex(0xE8743B);
     for (int c = 0; c < nC && geoLayerKind == 0; c++) {
       int d = geoStats[size_t(c)].docs;
@@ -370,14 +372,14 @@ void App::geoDensity() const {
   }
 }
 
-void App::geoPaint(ID2D1DeviceContext* dc) {
+void App::geoPaint(ID2D1DeviceContext* dc, const NetView& v) {
   if (!geoBasemap && geoMode() == 1 && geoLayerKind != 2) return;
   geoEnsureWorld();
   Theme th = canvasTheme(P->style);
   vector<GeoFill> fills;
   vector<GeoBubble> bubbles;
   vector<GeoArc> arcs;
-  geoLayer(th, fills, bubbles, arcs);
+  geoLayer(th, fills, bubbles, arcs, v);
   auto* f = g.d2f.get();
   if (geoGeom.empty()) {
     geoGeom.resize(geoWorld.size());
@@ -435,8 +437,8 @@ void App::geoPaint(ID2D1DeviceContext* dc) {
   }
   D2D1_MATRIX_3X2_F base;
   dc->GetTransform(&base);
-  float z = float(nv.cam.zoom);
-  D2D1_MATRIX_3X2_F W = D2D1::Matrix3x2F::Scale(z, z) * D2D1::Matrix3x2F::Translation(float(nv.vp.x + nv.vp.w / 2 - nv.cam.x * z), float(nv.vp.y + nv.vp.h / 2 - nv.cam.y * z));
+  float z = float(v.cam.zoom);
+  D2D1_MATRIX_3X2_F W = D2D1::Matrix3x2F::Scale(z, z) * D2D1::Matrix3x2F::Translation(float(v.vp.x + v.vp.w / 2 - v.cam.x * z), float(v.vp.y + v.vp.h / 2 - v.cam.y * z));
   dc->SetTransform(W * base);
   Com<ID2D1SolidColorBrush> br;
   dc->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, 1), br.put());
@@ -487,8 +489,8 @@ void App::geoPaint(ID2D1DeviceContext* dc) {
     for (size_t k = arcs.size(); k-- > 0;) {  // weakest first
       auto& a = arcs[k];
       float ax, ay, bx, by, cx, cy;
-      geoW2S(nv, a.ax, a.ay, ax, ay);
-      geoW2S(nv, a.bx, a.by, bx, by);
+      geoW2S(v, a.ax, a.ay, ax, ay);
+      geoW2S(v, a.bx, a.by, bx, by);
       arcCtrl(ax, ay, bx, by, cx, cy);
       Com<ID2D1PathGeometry> pg;
       if (FAILED(f->CreatePathGeometry(pg.put()))) continue;
@@ -508,7 +510,7 @@ void App::geoPaint(ID2D1DeviceContext* dc) {
   for (size_t i : ord) {
     auto& b = bubbles[i];
     float sx, sy;
-    geoW2S(nv, b.wx, b.wy, sx, sy);
+    geoW2S(v, b.wx, b.wy, sx, sy);
     D2D1_ELLIPSE e{{sx, sy}, b.r, b.r};
     set(b.fill);
     dc->FillEllipse(e, br.get());
@@ -525,7 +527,7 @@ void App::geoPrims(Scene& sc, double k, bool under) const {
   vector<GeoFill> fills;
   vector<GeoBubble> bubbles;
   vector<GeoArc> arcs;
-  geoLayer(th, fills, bubbles, arcs);
+  geoLayer(th, fills, bubbles, arcs, nv);
   auto X = [&](float wx, float wy, float& x, float& y) { float sx, sy; geoW2S(nv, wx, wy, sx, sy); x = float((sx - nv.vp.x) * k); y = float((sy - nv.vp.y) * k); };
   if (under) {
     if (!geoBasemap && geoMode() == 1 && geoLayerKind != 2) return;
@@ -643,7 +645,7 @@ void App::geoChrome(bool mouseFree) {
   if (!mode) { geoHover = -1; return; }
   geoEnsureWorld();
   int h = mouseFree && canvasR.has(ui.in.mx, ui.in.my) ? geoHit(ui.in.mx, ui.in.my) : -1;
-  if (h != geoHover) { geoHover = h; }
+  if (h != geoHover) { geoHover = h; needFrame = true; }  // the highlight is part of the canvas layer: next frame
   if (mode == 2) {
     if (geoHover >= 0) {
       const GeoStat& st = geoStats[size_t(geoHover)];
@@ -805,15 +807,16 @@ void App::geoLayerSwitch() {
 }  // namespace vs
 
 namespace vs { namespace win {
-void App::geoFitBounds(ViewKind v) {
+void App::geoFitBounds(ViewKind v) { geoFitBounds(v, nv); }
+void App::geoFitBounds(ViewKind v, NetView& target) {
   if (v == ViewKind::Geo) {
     float x0, y0, x1, y1, t;
     geoProject(-180, 0, x0, t);
     geoProject(180, 0, x1, t);
     geoProject(0, 83, t, y0);
     geoProject(0, -57, t, y1);
-    nv.fitX0 = x0; nv.fitX1 = x1; nv.fitY0 = y0; nv.fitY1 = y1;
-  } else nv.fitX0 = nv.fitX1 = 0;
+    target.fitX0 = x0; target.fitX1 = x1; target.fitY0 = y0; target.fitY1 = y1;
+  } else target.fitX0 = target.fitX1 = 0;
 }
 
 // ------------------------------------------------------------------ publication figure panel (Geo)
@@ -866,7 +869,7 @@ FigPanelDef App::geoFigurePanel() {
     vector<GeoArc> arcs;
     geoFig_ = true;
     geoFigPx_ = worldW * c.s / 1000.0;  // on screen the world is about 1000 px wide
-    geoLayer(th, fills, bubbles, arcs);
+    geoLayer(th, fills, bubbles, arcs, nv);
     geoFig_ = false;
     auto X = [&](double lon, double lat, float& x, float& y) { float wx, wy; geoProject(lon, lat, wx, wy); x = float(wx * c.s + c.ox); y = float(wy * c.s + c.oy); };
     auto W = [&](float wx, float wy, float& x, float& y) { x = float(wx * c.s + c.ox); y = float(wy * c.s + c.oy); };

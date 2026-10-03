@@ -17,7 +17,7 @@ App* g_app = nullptr;
 wchar_t g_crashDir[MAX_PATH] = {0};
 wchar_t g_recoveryDir[MAX_PATH] = {0};
 volatile LONG g_inCrash = 0;
-const char* kVersionText = "1.8.0";
+const char* kVersionText = kAppVersion;
 
 std::wstring localDir(const wchar_t* sub) {
   wchar_t p[MAX_PATH] = {0};

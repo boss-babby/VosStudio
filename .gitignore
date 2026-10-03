@@ -1,0 +1,15 @@
+# build outputs
+build/
+dist/
+installer/Output/
+VOSStudio.exe
+*.o
+# PDFium binaries are downloaded by tools/fetch-pdfium.sh (see third_party/pdfium/README.md); never committed
+# Tectonic archives and extracted executable live under the ignored build/ tree.
+third_party/pdfium/win-x64/
+third_party/pdfium/linux-x64/
+third_party/pdfium/*.tgz
+third_party/pdfium/*.part
+# python caches from the test helpers
+__pycache__/
+*.pyc

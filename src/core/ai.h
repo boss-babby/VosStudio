@@ -99,6 +99,7 @@ struct CleanProposal {
   vector<string> members;   // labels merged into target
   string kind, reason;      // "synonym", "abbreviation", "variant", "generic"
   bool ignore = false;      // remove the term from maps
+  double confidence = 0;    // 0..1 as given by the model (0 = not given)
 };
 string cleanTermList(const vector<std::pair<string, int>>& terms, size_t maxTerms);
 bool parseCleanPlan(const string& reply, vector<CleanProposal>& out);
@@ -113,6 +114,7 @@ const ToolSpec* findTool(const string& name);
 string agentSystemPrompt();
 struct AgentAction { string thought, tool, final; Json args; };
 bool parseAgentAction(const string& reply, AgentAction& out, string* err);
+string extractJsonBlock(const string& reply, char open, char close);  // first balanced {...} / [...] in a model reply (code fences tolerated)
 string agentGoalMessage(const string& goal, const string& context);
 string agentResultMessage(const string& tool, bool ok, const string& result);
 constexpr int kAgentMaxSteps = 30;

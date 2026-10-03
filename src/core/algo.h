@@ -18,6 +18,11 @@ struct LayoutOpts {
   double attraction = 1, repulsion = 0;
   int starts = 3, iterations = 0, seed = 0;
   bool threeD = false;
+  // Keep the exact VOS repulsion for small maps; use a Barnes–Hut spatial approximation above this size.
+  // These are algorithm tuning values (not document/UI settings) and may be overridden by the benchmark harness.
+  // theta=0.8 is the current measured speed/quality compromise; oracle tests compare it to exact small-map layouts.
+  int exactRepulsionLimit = 512;
+  double barnesHutTheta = 0.8;
 };
 // VOS mapping technique (van Eck & Waltman). Returns final energy. Writes x,y(,z) into nodes (≈ unit scale).
 double vosLayout(Network& net, const LayoutOpts& o, Progress prog = nullptr, const std::atomic<bool>* cancel = nullptr);

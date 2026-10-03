@@ -74,6 +74,11 @@ string replaceAll(string s, const string& from, const string& to);
 string collapseWs(const string& s);
 string titleCase(const string& s);
 string fmtInt(long long v);             // 1,234
+// The application's version and a reference to it, for the methods paragraph and "Cite" (set by the shell at start).
+void setAppVersion(const string& v);
+const string& appVersion();
+string currentYear();                   // "2026"
+string softwareReference(bool bibtex);  // APA-style reference to this software, or a BibTeX entry
 string fmtNum(double v, int dec = 1);    // 12.3
 string fmtFixed(double v, int dec);
 string truncate(const string& s, size_t n);  // UTF-8 aware, adds …
@@ -86,6 +91,10 @@ string readFile(const string& path, bool* ok = nullptr);
 bool writeFile(const string& path, const string& data);
 bool writeFileParts(const string& path, const std::vector<const string*>& parts);
 FILE* openFileUtf8(const string& path, bool write);
+bool fileExistsU(const string& path);
+long long fileSizeU(const string& path);   // -1 when it cannot be opened
+bool removeFileU(const string& path);
+bool renameFileU(const string& from, const string& to);  // replaces an existing target
 string fileExt(const string& path);      // lower-case, without dot
 string fileName(const string& path);
 string xmlEscape(const string& s);

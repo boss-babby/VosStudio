@@ -5,7 +5,8 @@
 using namespace vs;
 int main(){
   Corpus C; string t = sampleWoSExport(); BibFormat f = detectFormat(t, "s.txt");
-  int n = parseRecords(t, f, C.recs); C.format=f; C.duplicatesRemoved = deduplicate(C.recs);
+  int n = parseRecords(t, f, C.recs); C.format=f; C.duplicatesRemoved = 0;
+  printf("duplicate candidates=%zu (retained for explicit review)\\n", recordDuplicateGroups(C.recs).size());
   auto q = qualityReport(C);
   printf("WoS fmt=%s n=%d years=%d-%d sources=%d authors=%d cpd=%.1f doi=%.2f refs=%lld\n", formatLabel(f), n, q.yearMin,q.yearMax,q.sources,q.authors,q.citesPerDoc,q.doiCov,q.totalRefs);
   printf("rec0: %s | %s | %zu refs | %s | aff=%s ctry=%s\n", C.recs[0].title.c_str(), C.recs[0].authors[0].c_str(), C.recs[0].refs.size(), C.recs[0].refs[0].c_str(), C.recs[0].affiliations[0].c_str(), C.recs[0].countries[0].c_str());

@@ -40,10 +40,17 @@ int Project::addFile(const string& name, const string& text, string* err) {
 int Project::addRecords(const string& name, BibFormat f, vector<Record>& recs) {
   int n = int(recs.size());
   size_t before = corpus.recs.size();
+  uint64_t bit = Corpus::fileBit(corpus.files.size());
+  for (auto& r : recs) r.src = bit;
+  std::unordered_set<string> existingIds;
+  existingIds.reserve(corpus.recs.size());
+  for (const auto& r : corpus.recs) if (!r.id.empty()) existingIds.insert(r.id);
+  lastRecordIdConflicts = 0;
+  std::unordered_set<string> incomingIds = existingIds;
+  for (const Record& r : recs) if (!r.id.empty() && !incomingIds.insert(r.id).second) lastRecordIdConflicts++;
+  ensureRecordIds(recs, existingIds);
   corpus.recs.insert(corpus.recs.end(), std::make_move_iterator(recs.begin()), std::make_move_iterator(recs.end()));
   recs.clear();
-  int removed = deduplicate(corpus.recs);
-  corpus.duplicatesRemoved += removed;
   SourceFile sf;
   sf.name = fileName(name);
   sf.format = f;
@@ -72,7 +79,47 @@ int Project::addSample(bool scopus) {
   return addFile(scopus ? "sample-scopus.csv" : "sample-wos.txt", t);
 }
 
-void Project::clearCorpus() { corpus.clear(); living = Json::object(); corpusChanged(); }
+void Project::clearCorpus() { corpus.clear(); living = Json::object(); lastRecordIdConflicts = 0; corpusChanged(); }
+
+int Project::removeFile(int k) {
+  if (k < 0 || k >= int(corpus.files.size()) || k >= 63 || !corpus.provenanceKnown()) return -1;
+  uint64_t bit = Corpus::fileBit(size_t(k));
+  vector<Record> keep;
+  keep.reserve(corpus.recs.size());
+  vector<int> map(corpus.recs.size(), -1);
+  int removed = 0;
+  for (size_t i = 0; i < corpus.recs.size(); i++) {
+    Record& r = corpus.recs[i];
+    uint64_t m = r.src & ~bit;
+    if (m == 0) { removed++; continue; }
+    m = (m & (bit - 1)) | ((m >> (k + 1)) << k);  // the files after k move down one slot
+    r.src = m;
+    map[i] = int(keep.size());
+    keep.push_back(std::move(r));
+  }
+  corpus.recs.swap(keep);
+  corpus.files.erase(corpus.files.begin() + k);
+  long long parsed = 0;
+  for (auto& f : corpus.files) parsed += f.records;
+  corpus.duplicatesRemoved = int(std::max(0ll, parsed - (long long)corpus.recs.size()));
+  if (corpus.files.empty()) corpus.format = BibFormat::Unknown;
+  else {
+    corpus.format = corpus.files.front().format;
+    for (auto& f : corpus.files) if (f.format != corpus.format) corpus.format = BibFormat::Unknown;
+  }
+  auto fix = [&](Network& N) {
+    for (auto& nd : N.nodes) {
+      vector<int> nr;
+      for (int ri : nd.recs) if (ri >= 0 && ri < int(map.size()) && map[size_t(ri)] >= 0) nr.push_back(map[size_t(ri)]);
+      nd.recs.swap(nr);
+    }
+  };
+  fix(net);
+  for (auto& m : maps) fix(m.net);
+  corpusChanged();
+  dirty = true;
+  return removed;
+}
 
 void Project::corpusChanged() {
   static std::atomic<uint64_t> counter{0};
@@ -229,33 +276,46 @@ static vector<string> arrStr(const Json& j) { vector<string> v; for (auto& x : j
 
 Json recordToJson(const Record& r) {
   Json j = Json::object();
+  if (!r.id.empty()) j.set("rid", r.id);
   j.set("ti", r.title);
   if (!r.abstract_.empty()) j.set("ab", r.abstract_);
   j.set("so", r.source);
   if (!r.doi.empty()) j.set("doi", r.doi);
+  if (!r.url.empty()) j.set("url", r.url);
   if (!r.volume.empty()) j.set("vl", r.volume);
+  if (!r.issue.empty()) j.set("is", r.issue);
   if (!r.pages.empty()) j.set("pg", r.pages);
   if (!r.docType.empty()) j.set("dt", r.docType);
   if (!r.publisher.empty()) j.set("pu", r.publisher);
   if (!r.language.empty()) j.set("la", r.language);
+  if (!r.key.empty()) j.set("sourceKey", r.key);
+  if (!r.extra.empty()) { Json ex = Json::object(); for (const auto& kv : r.extra) ex.set(kv.first, kv.second); j.set("extra", ex); }
+  if (r.duplicateReviewed) j.set("duplicateReviewed", true);
   j.set("py", r.year);
   j.set("tc", r.cites);
   j.set("au", strArr(r.authors));
+  if (!r.authorIds.empty()) j.set("ai", strArr(r.authorIds));
   if (!r.keywords.empty()) j.set("de", strArr(r.keywords));
   if (!r.indexTerms.empty()) j.set("id", strArr(r.indexTerms));
   if (!r.affiliations.empty()) j.set("c1", strArr(r.affiliations));
   if (!r.countries.empty()) j.set("cu", strArr(r.countries));
   if (!r.refs.empty()) j.set("cr", strArr(r.refs));
+  if (r.src) { Json sf = Json::array(); for (int k = 0; k < 64; k++) if (r.src & (1ull << k)) sf.push(k); j.set("sf", sf); }
   return j;
 }
 
 Record recordFromJson(const Json& j) {
   Record r;
-  r.title = j["ti"].str(); r.abstract_ = j["ab"].str(); r.source = j["so"].str(); r.doi = j["doi"].str(); r.volume = j["vl"].str();
-  r.pages = j["pg"].str(); r.docType = j["dt"].str(); r.publisher = j["pu"].str(); r.language = j["la"].str();
+  r.id = j["rid"].str();
+  r.title = j["ti"].str(); r.abstract_ = j["ab"].str(); r.source = j["so"].str(); r.doi = j["doi"].str(); r.url = j["url"].str(); r.volume = j["vl"].str(); r.issue = j["is"].str();
+  r.pages = j["pg"].str(); r.docType = j["dt"].str(); r.publisher = j["pu"].str(); r.language = j["la"].str(); r.key = j["sourceKey"].str();
+  const Json& ex = j["extra"]; if (ex.t == Json::Obj) for (const auto& kv : ex.o) r.extra[kv.first] = kv.second.str();
+  r.duplicateReviewed = j["duplicateReviewed"].boolean(false);
   r.year = j["py"].integer(); r.cites = j["tc"].integer();
-  r.authors = arrStr(j["au"]); r.keywords = arrStr(j["de"]); r.indexTerms = arrStr(j["id"]); r.affiliations = arrStr(j["c1"]);
+  r.authors = arrStr(j["au"]); r.authorIds = arrStr(j["ai"]); if (r.authorIds.size() != r.authors.size()) r.authorIds.clear(); r.keywords = arrStr(j["de"]); r.indexTerms = arrStr(j["id"]); r.affiliations = arrStr(j["c1"]);
   r.countries = arrStr(j["cu"]); r.refs = arrStr(j["cr"]);
+  const Json& sf = j["sf"];
+  if (sf.t == Json::Arr) for (size_t i = 0; i < sf.size(); i++) { int k = sf[i].integer(); if (k >= 0 && k < 64) r.src |= 1ull << k; }
   return r;
 }
 
@@ -442,7 +502,7 @@ Json Project::toJson(bool includeRecords, string* recDumpOut) const {
     f.set("network", fig.panelNetwork); f.set("overlay", fig.panelOverlay); f.set("density", fig.panelDensity);
     f.set("timeline", fig.panelTimeline); f.set("geo", fig.panelGeo); f.set("threeD", fig.panel3D); f.set("matrix", fig.panelMatrix);
     f.set("legend", fig.legend); f.set("sizeLegend", fig.sizeLegend); f.set("colorbar", fig.colorbar); f.set("letters", fig.letters);
-    f.set("transparent", fig.transparent); f.set("pdfPages", fig.pdfPages); f.set("serif", fig.serif); f.set("footer", fig.footer); f.set("shading", fig.shading);
+    f.set("transparent", fig.transparent); f.set("pdfPages", fig.pdfPages); f.set("hybridExport", fig.hybridExport); f.set("serif", fig.serif); f.set("footer", fig.footer); f.set("shading", fig.shading);
     f.set("title", fig.title); f.set("caption", fig.caption); f.set("dpi", fig.dpi);
     j.set("figure", f);
   }
@@ -464,6 +524,8 @@ Json Project::toJson(bool includeRecords, string* recDumpOut) const {
     j.set("mapCur", mapCur);
   }
   if (assistant.t == Json::Arr && assistant.size() > 0) j.set("assistant", assistant);
+  if (document.t == Json::Obj) j.set("document", document);
+  if (library.hasData()) j.set("library", library.toJson());
   if (living.t == Json::Obj && living.has("query")) j.set("living", living);
   // corpus
   Json c = Json::object();
@@ -488,6 +550,7 @@ Json Project::toJson(bool includeRecords, string* recDumpOut) const {
 }
 
 bool Project::fromJson(const Json& j, string* err, vector<Record>* preloaded) {
+  bool migratedRecordIds = false;
   if (j["format"].str() != "vosstudio-native-project" && j["format"].str() != "vosstudio-bundle") { if (err) *err = "Not a VOSStudio project file."; return false; }
   specFromJson(spec, j["analysis"]);
   paramsFromJson(params, j["build"]);
@@ -506,7 +569,7 @@ bool Project::fromJson(const Json& j, string* err, vector<Record>* preloaded) {
     flag("network", fig.panelNetwork); flag("overlay", fig.panelOverlay); flag("density", fig.panelDensity);
     flag("timeline", fig.panelTimeline); flag("geo", fig.panelGeo); flag("threeD", fig.panel3D); flag("matrix", fig.panelMatrix);
     flag("legend", fig.legend); flag("sizeLegend", fig.sizeLegend); flag("colorbar", fig.colorbar); flag("letters", fig.letters);
-    flag("transparent", fig.transparent); flag("pdfPages", fig.pdfPages); flag("serif", fig.serif); flag("footer", fig.footer);
+    flag("transparent", fig.transparent); flag("pdfPages", fig.pdfPages); flag("hybridExport", fig.hybridExport); flag("serif", fig.serif); flag("footer", fig.footer);
     fig.title = f["title"].str(); fig.caption = f["caption"].str();
   }
   // corpus
@@ -527,6 +590,7 @@ bool Project::fromJson(const Json& j, string* err, vector<Record>* preloaded) {
   } else if (preloaded) {
     corpus.recs = std::move(*preloaded);
   }
+  migratedRecordIds = ensureRecordIds(corpus.recs) > 0;
   corpusChanged();
   // map
   const Json& m = j["map"];
@@ -566,8 +630,11 @@ bool Project::fromJson(const Json& j, string* err, vector<Record>* preloaded) {
     if (mapCur < 0 && !maps.empty()) { maps.clear(); }  // malformed: fall back to the single current map
   }
   assistant = j.has("assistant") && j["assistant"].t == Json::Arr ? j["assistant"] : Json::array();
+  document = j.has("document") && j["document"].t == Json::Obj ? j["document"] : Json();
+  library.fromJson(j["library"]);
+  int migratedLibraryKeys = library.migrateRecordKeys(corpus);
   living = j.has("living") && j["living"].t == Json::Obj ? j["living"] : Json::object();
-  dirty = false;
+  dirty = migratedRecordIds || migratedLibraryKeys > 0;
   return true;
 }
 

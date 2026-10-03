@@ -6,10 +6,16 @@ namespace vs {
 
 // ------------------------------------------------------------ records
 struct Record {
-  string title, abstract_, source, doi, volume, pages, docType, publisher, language, key;
+  string id;  // durable local identity; unlike the source key/DOI, survives metadata corrections
+  string title, abstract_, source, doi, url, volume, issue, pages, docType, publisher, language, key;
+  std::map<string, string> extra;  // imported fields without a first-class slot; preserved by project and ID-aware RIS/BibTeX/CSV round trips
   int year = 0;   // 0 = unknown
   int cites = 0;
+  bool duplicateReviewed = false;  // explicit decision to keep a detected duplicate separate; never suppresses the record
   vector<string> authors, keywords, indexTerms, affiliations, countries, refs;
+  vector<string> authorIds;  // parallel to authors when the source gives identifiers (ORCID "0000-…", "scopus:123", "openalex:A123"); empty = unknown
+  uint64_t src = 0;  // provenance: bit k set = the record came from Corpus::files[k] (a merged duplicate carries every file it
+                     // appeared in; files beyond the 64th share the last bit). 0 = unknown (projects saved before 1.9.2).
 };
 
 enum class BibFormat { Unknown, WoS, WoSTab, Scopus, RIS, BibTeX, OpenAlex, VOSviewer, Bundle };
@@ -28,6 +34,11 @@ struct Corpus {
   int duplicatesRemoved = 0;
   bool empty() const { return recs.empty(); }
   void clear() { recs.clear(); files.clear(); format = BibFormat::Unknown; duplicatesRemoved = 0; }
+  // per-file provenance (1.9.2)
+  static uint64_t fileBit(size_t k) { return 1ull << (k < 63 ? k : 63); }
+  bool provenanceKnown() const;                 // every record knows its file(s): single files can be removed
+  struct FileStat { int unique = 0, shared = 0; };  // records only this file brought / records that other files also contain
+  FileStat fileStat(size_t k) const;
 };
 
 struct QualityReport {
